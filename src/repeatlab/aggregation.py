@@ -3,7 +3,7 @@
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, localcontext
 
 from repeatlab.temporal import Order, OrderKind
 
@@ -93,7 +93,12 @@ def _exact_total(events: list[CleanEvent]) -> Decimal:
         terms.append((coefficient * event.quantity, price.exponent))
     exponent = min(exponent for _, exponent in terms)
     total = sum(coefficient * 10 ** (scale - exponent) for coefficient, scale in terms)
-    return Decimal((int(total < 0), Decimal(abs(total)).as_tuple().digits, exponent))
+    with localcontext() as context:
+        context.traps[InvalidOperation] = True
+        try:
+            return Decimal((int(total < 0), Decimal(abs(total)).as_tuple().digits, exponent))
+        except InvalidOperation as error:
+            raise ValueError("exact order total is not representable as Decimal") from error
 
 
 def aggregate_orders(
@@ -106,6 +111,7 @@ def aggregate_orders(
     invoice is quarantined in full, while other invoices are still processed.
     Equal business contents with different identifiers are retained and flagged
     across all input events. Money is exact and independent of Decimal context.
+    An unrepresentable total raises ValueError without changing caller context.
     """
     invoices: dict[str, list[CleanEvent]] = {}
     contents: dict[tuple[object, ...], list[str]] = {}

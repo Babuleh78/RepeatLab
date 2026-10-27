@@ -2,7 +2,16 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal, localcontext
+from decimal import (
+    MAX_EMAX,
+    MIN_ETINY,
+    ROUND_FLOOR,
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    localcontext,
+)
 from itertools import permutations
 from typing import Any, cast
 
@@ -235,6 +244,87 @@ def test_money_is_exact_under_restrictive_caller_decimal_context(
             assert order.quantity == sum(quantities)
         assert not any(context.flags.values())
         assert context.prec == 2
+
+
+def context_state(context: Context) -> tuple[object, ...]:
+    return (
+        context.prec,
+        context.rounding,
+        context.Emin,
+        context.Emax,
+        context.capitals,
+        context.clamp,
+        dict(context.traps),
+        dict(context.flags),
+    )
+
+
+@pytest.mark.parametrize("trap_invalid_operation", [False, True])
+@pytest.mark.parametrize("quantity,kind", [(10, "sale"), (-10, "cancellation")])
+def test_unrepresentable_total_is_rejected_without_changing_caller_context(
+    trap_invalid_operation: bool, quantity: int, kind: str
+) -> None:
+    events = (event(quantity=quantity, kind=kind, unit_price=Decimal((0, (1,), MAX_EMAX))),)
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_FLOOR
+        context.Emin = -9
+        context.Emax = 9
+        context.capitals = 0
+        context.clamp = 1
+        context.traps[InvalidOperation] = trap_invalid_operation
+        context.clear_flags()
+        context.flags[Inexact] = True
+        before = context_state(context)
+        try:
+            with pytest.raises(ValueError, match="representable"):
+                aggregate_orders(events)
+        finally:
+            assert context_state(context) == before
+
+
+@pytest.mark.parametrize("trap_invalid_operation", [False, True])
+@pytest.mark.parametrize(
+    "quantities,exponent,kind,expected",
+    [
+        ((9,), MAX_EMAX, "sale", Decimal((0, (9,), MAX_EMAX))),
+        ((5, 5), MAX_EMAX - 1, "sale", Decimal((0, (1,), MAX_EMAX))),
+        ((-9,), MAX_EMAX, "cancellation", Decimal((1, (9,), MAX_EMAX))),
+        ((1,), MIN_ETINY, "sale", Decimal((0, (1,), MIN_ETINY))),
+        ((-1,), MIN_ETINY, "cancellation", Decimal((1, (1,), MIN_ETINY))),
+    ],
+)
+def test_representable_boundary_totals_remain_exact_and_preserve_caller_context(
+    trap_invalid_operation: bool,
+    quantities: tuple[int, ...],
+    exponent: int,
+    kind: str,
+    expected: Decimal,
+) -> None:
+    events = tuple(
+        event(str(index), quantity=quantity, kind=kind, unit_price=Decimal((0, (1,), exponent)))
+        for index, quantity in enumerate(quantities)
+    )
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_FLOOR
+        context.Emin = -9
+        context.Emax = 9
+        context.capitals = 0
+        context.clamp = 1
+        for signal in context.traps:
+            context.traps[signal] = True
+        context.traps[InvalidOperation] = trap_invalid_operation
+        context.clear_flags()
+        context.flags[Inexact] = True
+        before = context_state(context)
+        result = aggregate_orders(events)
+
+        assert result.orders[0].total_amount.is_finite()
+        assert result.orders[0].total_amount == expected
+        assert context_state(context) == before
 
 
 @pytest.mark.parametrize(
