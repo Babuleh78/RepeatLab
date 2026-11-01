@@ -16,6 +16,8 @@ build/
 *.egg-info/
 .coverage
 htmlcov/
+java/target/
+.mvn/wrapper/maven-wrapper.jar
 .agents
 .github
 docs
