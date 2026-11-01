@@ -15,6 +15,8 @@ import java.util.HexFormat;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class IngestionTest {
     @TempDir Path temp;
@@ -216,6 +218,55 @@ class IngestionTest {
         assertEquals("Sheet2", fatal.path("sheet_name").asText());
         assertEquals(1, fatal.path("row_number").asInt());
         assertEquals("failed", fatal.path("status").asText());
+    }
+
+    @Test void excludesPhoneticAnnotationsFromSharedAndInlineIdentifiers() throws Exception {
+        String shared = data(2).replace(text("G2", "00042"), "<c r=\"G2\" t=\"s\"><v>1</v></c>");
+        String inline = data(3).replace(text("G3", "00042"),
+                "<c r=\"G3\" t=\"inlineStr\"><is><t>BASE</t><rPh sb=\"0\" eb=\"4\"><t>READING</t></rPh></is></c>");
+        Path source = write(temp.resolve("phonetic.xlsx"), false, header() + shared + inline);
+        Path out = temp.resolve("out");
+        assertEquals(0, ingest(source, out));
+        List<JsonNode> raw = lines(out.resolve("raw_transactions.jsonl"));
+        assertAll(
+                () -> assertEquals("BASE", raw.get(1).path("cells").get(6).path("value").asText()),
+                () -> assertEquals("BASE", raw.get(2).path("cells").get(6).path("value").asText()),
+                () -> assertEquals("1", raw.get(1).path("cells").get(6).path("raw_value").asText()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"inlineStr", "d"})
+    void acceptsYear9999ForTextAndDateCells(String type) throws Exception {
+        String value = "9999-12-31T23:59:59";
+        String cell = type.equals("inlineStr") ? text("E2", value)
+                : "<c r=\"E2\" t=\"d\"><v>" + value + "</v></c>";
+        Path source = write(temp.resolve("last-year.xlsx"), false,
+                header() + data(2).replace(number("E2", "1.5"), cell));
+        Path out = temp.resolve("out");
+        assertEquals(0, ingest(source, out));
+        assertEquals(value, json(out.resolve("audit.json")).path("date_range").path("max").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"inlineStr", "d"})
+    void reportsYear10000WithoutLosingTextOrDateCells(String type) throws Exception {
+        String value = "+10000-01-01T00:00:00";
+        String cell = type.equals("inlineStr") ? text("E2", value)
+                : "<c r=\"E2\" t=\"d\"><v>" + value + "</v></c>";
+        Path source = write(temp.resolve("later-year.xlsx"), false,
+                header() + data(2).replace(number("E2", "1.5"), cell) + data(3));
+        Path out = temp.resolve("out");
+        assertEquals(2, ingest(source, out));
+        List<JsonNode> raw = lines(out.resolve("raw_transactions.jsonl"));
+        assertEquals(3, raw.size());
+        assertEquals(value, raw.get(1).path("cells").get(4).path("value").asText());
+        assertEquals(type, raw.get(1).path("cells").get(4).path("source_type").asText());
+        List<JsonNode> issues = lines(out.resolve("issues.jsonl"));
+        assertTrue(issues.stream().anyMatch(n -> n.path("code").asText().equals("INVALID_DATE")
+                && n.path("severity").asText().equals("error") && n.path("row_number").asInt() == 2
+                && n.path("column").asText().equals("E")));
+        assertEquals("1900-01-01T12:00:00", json(out.resolve("audit.json")).path("date_range").path("max").asText());
+        assertEquals("errors", json(out.resolve("manifest.json")).path("data_status").asText());
     }
 
     private static String hash(Path path) throws Exception {

@@ -47,7 +47,7 @@ final class WorkbookFixture {
             }
             types.append("<Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/>");
             rels.append("<Relationship Id=\"strings\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/>");
-            entry(zip, "xl/sharedStrings.xml", "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"1\" uniqueCount=\"1\"><si><r><t xml:space=\"preserve\"> 000</t></r><r><t xml:space=\"preserve\">42\u00a0 </t></r></si></sst>");
+            entry(zip, "xl/sharedStrings.xml", "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"2\" uniqueCount=\"2\"><si><r><t xml:space=\"preserve\"> 000</t></r><r><t xml:space=\"preserve\">42\u00a0 </t></r></si><si><t>BASE</t><rPh sb=\"0\" eb=\"4\"><t>READING</t></rPh></si></sst>");
             entry(zip, "[Content_Types].xml", types.append("</Types>").toString());
             entry(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>");
             entry(zip, "xl/workbook.xml", book.append("</sheets></workbook>").toString());

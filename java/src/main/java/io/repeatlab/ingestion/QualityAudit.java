@@ -119,16 +119,21 @@ final class QualityAudit {
 
     private static LocalDateTime date(Cell cell, boolean date1904) {
         if (cell.empty() || !cell.scalar()) throw new IllegalArgumentException("Not a date cell");
+        LocalDateTime result;
         if (cell.source_type().equals("n")) {
             BigDecimal serial = new BigDecimal(cell.value());
             if (serial.signum() < 0 || serial.compareTo(new BigDecimal("2958466")) >= 0)
                 throw new IllegalArgumentException("Serial outside supported calendar");
             long days = serial.setScale(0, RoundingMode.DOWN).longValueExact();
-            return excelDate(serial, days, date1904);
+            result = excelDate(serial, days, date1904);
+        } else {
+            String value = cell.value();
+            result = value.length() == 10
+                    ? LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE).atStartOfDay()
+                    : LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
         }
-        String value = cell.value();
-        if (value.length() == 10) return LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE).atStartOfDay();
-        return LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+        if (result.getYear() > 9999) throw new IllegalArgumentException("Date after year 9999");
+        return result;
     }
 
     private static LocalDateTime excelDate(BigDecimal serial, long days, boolean date1904) {
@@ -137,9 +142,7 @@ final class QualityAudit {
         long adjusted = !date1904 && days > 60 ? days - 1 : days;
         long nanos = serial.subtract(BigDecimal.valueOf(days)).multiply(new BigDecimal("86400000000000"))
                 .setScale(0, RoundingMode.HALF_UP).longValueExact();
-        LocalDateTime result = epoch.plusDays(adjusted).atStartOfDay().plusNanos(nanos);
-        if (result.getYear() > 9999) throw new IllegalArgumentException("Date after year 9999");
-        return result;
+        return epoch.plusDays(adjusted).atStartOfDay().plusNanos(nanos);
     }
 
     private void issue(String code, String severity, int sheet, String name, int row, Cell cell,

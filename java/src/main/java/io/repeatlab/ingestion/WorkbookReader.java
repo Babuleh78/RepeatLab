@@ -14,6 +14,7 @@ import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.openxml4j.opc.PackageAccess;
+import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
 import org.apache.poi.xssf.model.SharedStrings;
 
@@ -38,8 +39,7 @@ final class WorkbookReader {
     void read(Path source) throws Exception {
         try (OPCPackage pkg = OPCPackage.open(source.toFile(), PackageAccess.READ)) {
             XSSFReader reader = new XSSFReader(pkg);
-            reader.setUseReadOnlySharedStringsTable(true);
-            SharedStrings strings = reader.getSharedStringsTable();
+            SharedStrings strings = new ReadOnlySharedStringsTable(pkg, false);
             List<Sheet> descriptors;
             try (InputStream input = reader.getWorkbookData()) { descriptors = workbook(input); }
             if (descriptors.isEmpty()) throw new IOException("Workbook has no sheets");
