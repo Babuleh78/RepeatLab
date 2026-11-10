@@ -120,6 +120,50 @@ class CleaningTest {
         assertEquals(2, Files.readAllLines(clean(CONFIG, 0, header() + data(2) + iso).resolve("clean_events.jsonl")).size());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"2020-01-01T12:00", "2020-01-01t12:00",
+            "2020-01-01T12:00:00.", "+02020-01-01T12:00"})
+    void equivalentSupportedIsoSpellingsPreserveWholeInvoice(String timestamp) throws Exception {
+        String first = data(2).replace(number("E2", "1.5"), text("E2", timestamp));
+        String second = data(3).replace(number("E3", "1.5"), text("E3", "2020-01-01T12:00:00"));
+        Path source = write(temp.resolve("source.xlsx"), false, header() + first + second);
+        Path raw = temp.resolve("raw");
+        assertEquals(0, invoke("ingest", "--input", source.toString(), "--output", raw.toString()));
+        Path config = temp.resolve("config.json");
+        Files.writeString(config, CONFIG);
+        Path target = temp.resolve("clean");
+        assertEquals(0, invoke("clean", "--input", raw.toString(), "--config", config.toString(), "--output", target.toString()));
+        var events = Files.readAllLines(target.resolve("clean_events.jsonl"));
+        assertEquals(2, events.size());
+        for (String event : events)
+            assertEquals("2020-01-01T12:00:00", JSON.readTree(event).path("event_time").textValue());
+    }
+
+    @Test void extendedFractionsRemainExactWithSupportedIsoGrammar() throws Exception {
+        String first = data(2).replace(number("E2", "1.5"), text("E2", "2020-01-01t12:00:00.1000000000000000001"));
+        String equivalent = data(3).replace(number("E3", "1.5"), text("E3", "2020-01-01T12:00:00.10000000000000000010"));
+        Path accepted = clean(CONFIG, 0, header() + first + equivalent);
+        var events = Files.readAllLines(accepted.resolve("clean_events.jsonl"));
+        assertEquals(2, events.size());
+        assertEquals("2020-01-01T12:00:00.1", JSON.readTree(events.get(0)).path("event_time").textValue());
+        assertTrue(JSON.readTree(events.get(0)).path("quality_flags").toString().contains("TIME_PRECISION_FLOORED"));
+        String distinct = equivalent.replace(".10000000000000000010", ".1000000000000000002");
+        Path rejected = clean(CONFIG, 2, header() + first + distinct);
+        assertEquals("", Files.readString(rejected.resolve("clean_events.jsonl")));
+        for (String row : Files.readAllLines(rejected.resolve("dispositions.jsonl")))
+            assertTrue(JSON.readTree(row).path("reasons").toString().contains("INVOICE_CONFLICT_EVENT_TIME"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"2020-01-01T12:00Z", "2020-01-01T12:00:00+00:00",
+            "2020-01-01t12:00:00.000000001Z", "2020-01-01T12:00.", "2020-01-01T24:00"})
+    void invalidLocalTimeGrammarRemainsQuarantined(String timestamp) throws Exception {
+        String row = data(2).replace(number("E2", "1.5"), text("E2", timestamp));
+        Path target = clean(CONFIG, 2, header() + row);
+        assertEquals("", Files.readString(target.resolve("clean_events.jsonl")));
+        assertTrue(Files.readString(target.resolve("dispositions.jsonl")).contains("INVALID_EVENT_TIME"));
+    }
+
     @Test void missingInvoiceIsIsolatedAndCancellationIsRetained() throws Exception {
         String missing = data(2).replace(text("A2", "X1"), text("A2", " "));
         String cancel = data(3).replace("X1", "c1").replace(number("D3", "2"), number("D3", "-2"));

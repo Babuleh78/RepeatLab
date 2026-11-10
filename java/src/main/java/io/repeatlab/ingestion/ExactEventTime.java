@@ -5,11 +5,9 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.regex.Pattern;
 
 record ExactEventTime(BigDecimal seconds) {
     private static final BigDecimal DAY = BigDecimal.valueOf(86400);
-    private static final Pattern ISO = Pattern.compile("([0-9]{4}-[0-9]{2}-[0-9]{2})(?:T([0-9]{2}):([0-9]{2}):([0-9]{2})(\\.[0-9]+)?)?");
 
     static ExactEventTime parse(Cell cell, String dateSystem) {
         if (cell.isFormula() || cell.empty() || !cell.scalar()) throw new IllegalArgumentException("Invalid time");
@@ -25,16 +23,22 @@ record ExactEventTime(BigDecimal seconds) {
             result = BigDecimal.valueOf(date.toEpochDay()).multiply(DAY)
                     .add(serial.subtract(BigDecimal.valueOf(days)).multiply(DAY));
         } else {
-            var match = ISO.matcher(cell.value());
-            if (!match.matches()) throw new IllegalArgumentException("Expected ISO local time");
-            LocalDate date = LocalDate.parse(match.group(1));
-            int hour = match.group(2) == null ? 0 : Integer.parseInt(match.group(2));
-            int minute = match.group(3) == null ? 0 : Integer.parseInt(match.group(3));
-            int second = match.group(4) == null ? 0 : Integer.parseInt(match.group(4));
-            date.atTime(hour, minute, second);
-            result = BigDecimal.valueOf(date.toEpochDay()).multiply(DAY)
-                    .add(BigDecimal.valueOf(hour * 3600L + minute * 60L + second));
-            if (match.group(5) != null) result = result.add(new BigDecimal(match.group(5)));
+            String value = cell.value();
+            BigDecimal fraction = BigDecimal.ZERO;
+            int point = value.indexOf('.');
+            if (point >= 0) {
+                String digits = value.substring(point + 1);
+                if (!digits.chars().allMatch(c -> c >= '0' && c <= '9'))
+                    throw new IllegalArgumentException("Expected ISO fractional seconds");
+                if (!digits.isEmpty()) fraction = new BigDecimal("0." + digits);
+                // Keep the dot so the standard parser still validates the fraction's position.
+                value = value.substring(0, point + 1);
+            }
+            LocalDateTime time = value.length() == 10
+                    ? LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE).atStartOfDay()
+                    : LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            result = BigDecimal.valueOf(time.toLocalDate().toEpochDay()).multiply(DAY)
+                    .add(BigDecimal.valueOf(time.toLocalTime().toSecondOfDay())).add(fraction);
         }
         BigDecimal lower = BigDecimal.valueOf(LocalDate.of(1, 1, 1).toEpochDay()).multiply(DAY);
         BigDecimal upper = BigDecimal.valueOf(LocalDate.of(9999, 12, 31).toEpochDay() + 1).multiply(DAY);

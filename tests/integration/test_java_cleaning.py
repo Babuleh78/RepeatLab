@@ -9,6 +9,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import pytest
 from test_java_ingestion import JAR, java_command, workbook
 
 from repeatlab.temporal import build_snapshot
@@ -109,3 +110,26 @@ def test_clean_orders_snapshot_and_rearranged_rows(tmp_path: Path) -> None:
     assert (snapshots[0].history_order_count, snapshots[0].label) == (1, 1)
     reordered = module.read_clean_dataset(run_clean(tmp_path / "reordered", list(reversed(rows))))
     assert reordered.aggregate().orders == result.orders
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2020-01-01T12:00", "2020-01-01t12:00", "2020-01-01T12:00:00.", "+02020-01-01T12:00"],
+)
+def test_equivalent_iso_spellings_survive_verified_exchange(tmp_path: Path, timestamp: str) -> None:
+    read = importlib.import_module("repeatlab.cleaning").read_clean_dataset
+    dataset = read(
+        run_clean(
+            tmp_path,
+            [
+                ("I", "P", "1", timestamp, "0.1000", "A"),
+                ("I", "P", "1", "2020-01-01T12:00:00", "0.1000", "A"),
+            ],
+        )
+    )
+    assert dataset.counts["quarantined_rows"] == 0
+    assert len(dataset.events) == 2
+    assert {event.event_time for event in dataset.events} == {datetime(2020, 1, 1, 12)}
+    orders = dataset.aggregate().orders
+    assert len(orders) == 1
+    assert (orders[0].line_count, orders[0].total_amount) == (2, Decimal("0.2000"))
