@@ -14,10 +14,11 @@ public final class Main {
     private static final String HELP = """
             RepeatLab data CLI
             Usage: java -jar repeatlab-data.jar ingest --input <xlsx> --output <new-directory>
+                   java -jar repeatlab-data.jar clean --input <ingest-dir> --config <json> --output <new-directory>
                    java -jar repeatlab-data.jar --help
             Exit codes: 0 completed; 2 completed with data errors; 1 file/structure/I/O failure;
                         64 invalid invocation. Warnings alone return 0.
-            Output is raw data and audit only. A completed manifest is required for consumption.
+            A completed manifest is required for consumption of ingest or clean datasets.
             """;
 
     private Main() {}
@@ -26,6 +27,11 @@ public final class Main {
 
     public static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) { out.print(HELP); return 0; }
+        if (args.length > 0 && args[0].equals("clean")) {
+            int result = CleanCommand.run(args, out, err);
+            if (result == 64) err.print(HELP);
+            return result;
+        }
         if (args.length != 5 || !args[0].equals("ingest")) { err.print(HELP); return 64; }
         Map<String, String> parameters = new LinkedHashMap<>();
         for (int i = 1; i < args.length; i += 2) {
