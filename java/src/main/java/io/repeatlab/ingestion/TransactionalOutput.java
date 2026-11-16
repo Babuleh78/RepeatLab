@@ -21,7 +21,11 @@ final class TransactionalOutput {
     Path staging() { return staging; }
 
     void publish(Map<String, String> hashes, Object manifest, Object run) throws IOException {
-        for (String name : ARTIFACTS) {
+        publish(ARTIFACTS, hashes, manifest, run);
+    }
+
+    void publish(List<String> artifacts, Map<String, String> hashes, Object manifest, Object run) throws IOException {
+        for (String name : artifacts) {
             if (!Json.hash(staging.resolve(name)).equals(hashes.get(name)))
                 throw new IOException("Artifact checksum mismatch: " + name);
             Files.move(staging.resolve(name), output.resolve(name));
