@@ -344,8 +344,10 @@ java -jar java/target/repeatlab-data.jar analyze --input data/processed/clean-00
 ```
 
 На Windows укажите `--python .venv/Scripts/python.exe`. Требуется Python 3.12 с
-установленным пакетом RepeatLab. Java запускает его напрямую без shell и установки
-зависимостей во время анализа. Отдельный worker доступен как
+установленным пакетом RepeatLab. Java запускает его напрямую с `-I`: пакет выбирается
+из окружения указанного интерпретатора независимо от текущего каталога и `PYTHONPATH`.
+Запуск обходится без shell и установки зависимостей во время анализа.
+Отдельный worker доступен как
 `python -m repeatlab.orders --input <clean-dir> --output <new-orders-dir>`.
 
 Worker вызывает существующую агрегацию проверенного clean-набора. В `orders/` остаются

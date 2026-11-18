@@ -232,7 +232,7 @@ final class OrdersDataset {
     }
     static String identifier(JsonNode node) throws IOException {
         String value = StrictJson.text(node);
-        StrictJson.require(!value.isEmpty() && value.codePoints().anyMatch(c -> !Character.isWhitespace(c) && !Character.isSpaceChar(c) && c != 0x85), "Empty identifier");
+        StrictJson.require(!CleaningPolicy.missing(value), "Empty identifier");
         return value;
     }
     static long count(JsonNode node, String key) throws IOException { return StrictJson.integer(node.get(key), 0, Long.MAX_VALUE); }

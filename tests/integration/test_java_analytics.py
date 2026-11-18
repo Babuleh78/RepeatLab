@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import venv
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +13,17 @@ import pytest
 from test_java_cleaning import run_clean
 from test_java_ingestion import JAR, java_command
 
+from repeatlab.cleaning import read_clean_dataset
 
-def analyze(clean: Path, output: Path) -> subprocess.CompletedProcess[str]:
+
+def analyze(
+    clean: Path,
+    output: Path,
+    *,
+    python: Path | None = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             java_command(),
@@ -22,10 +33,12 @@ def analyze(clean: Path, output: Path) -> subprocess.CompletedProcess[str]:
             "--input",
             str(clean),
             "--python",
-            sys.executable,
+            str(python) if python is not None else sys.executable,
             "--output",
             str(output),
         ],
+        cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -36,6 +49,87 @@ def analyze(clean: Path, output: Path) -> subprocess.CompletedProcess[str]:
 
 def records(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("shadow_source", ["cwd", "pythonpath"])
+def test_analyze_uses_installed_worker_despite_caller_import_paths(
+    tmp_path: Path, shadow_source: str
+) -> None:
+    clean = run_clean(tmp_path / "source", [("I", "P", "1", "2020-01-01T00:00:00", "0.335", "A")])
+    shadow = tmp_path / "shadow"
+    package = shadow / "repeatlab"
+    package.mkdir(parents=True)
+    marker = tmp_path / "shadow-imported"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "orders.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise SystemExit(73)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+    result = analyze(
+        clean,
+        output,
+        cwd=shadow if shadow_source == "cwd" else tmp_path,
+        env={**os.environ, "PYTHONPATH": str(shadow)} if shadow_source == "pythonpath" else None,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert json.loads((output / "manifest.json").read_bytes())["status"] == "completed"
+    assert records(output / "monthly_activity.jsonl")[0]["total_amount"] == "0.335"
+
+
+@pytest.mark.parametrize("identifier", ["\u001c", "\u001d", "\u001e", "\u001f"])
+@pytest.mark.parametrize("field", ["invoice_id", "customer_id"])
+def test_analyze_preserves_control_identifiers_accepted_by_clean_policy(
+    tmp_path: Path, identifier: str, field: str
+) -> None:
+    clean = run_clean(tmp_path / "source", [("I", "P", "1", "2020-01-01T00:00:00", "0.335", "A")])
+    # These literal control IDs are valid in the JSON exchange, but not in an XML1.0 workbook.
+    event = records(clean / "clean_events.jsonl")[0]
+    event[field] = identifier
+    (clean / "clean_events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+    if field == "invoice_id":
+        disposition = records(clean / "dispositions.jsonl")[0]
+        disposition["invoice_id"] = identifier
+        (clean / "dispositions.jsonl").write_text(json.dumps(disposition) + "\n", encoding="utf-8")
+    manifest = json.loads((clean / "manifest.json").read_bytes())
+    manifest["artifacts"] = {
+        name: hashlib.sha256((clean / name).read_bytes()).hexdigest()
+        for name in manifest["artifacts"]
+    }
+    (clean / "manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    assert getattr(read_clean_dataset(clean).events[0], field) == identifier
+    output = tmp_path / "result"
+    result = analyze(clean, output)
+    assert result.returncode == 0, result.stderr
+    assert records(output / "orders/orders.jsonl")[0][field] == identifier
+    monthly = records(output / "monthly_activity.jsonl")[0]
+    assert (monthly["customer_count"], monthly["order_count"], monthly["total_amount"]) == (
+        1,
+        1,
+        "0.335",
+    )
+
+
+def install_test_worker(environment: Path, script: str) -> Path:
+    """Install a controlled stdlib-only package into a disposable interpreter's site-packages."""
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    probe = subprocess.run(
+        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    site = Path(probe.stdout.strip()).resolve()
+    assert site.is_relative_to(environment.resolve())
+    package = site / "repeatlab"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "orders.py").write_text(script, encoding="utf-8")
+    return python
 
 
 def test_exact_marts_quality_and_stable_hashes(tmp_path: Path) -> None:
@@ -145,11 +239,7 @@ def test_worker_protocol_cannot_publish_false_completion(tmp_path: Path, mode: s
     reference = tmp_path / "reference"
     result = analyze(clean, reference)
     assert result.returncode == 0, result.stderr
-    fake = tmp_path / "fake"
-    package = fake / "repeatlab"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    # The real child imports from its explicit working directory to test the protocol boundary.
+    # Select a disposable interpreter with a test-only installed worker at the process boundary.
     script = (
         "import pathlib, shutil, sys\n"
         "print('o' * 1100000)\nprint('e' * 1100000, file=sys.stderr)\n"
@@ -165,28 +255,9 @@ def test_worker_protocol_cannot_publish_false_completion(tmp_path: Path, mode: s
         "    (source / 'clean_events.jsonl').write_text('changed')\n"
         "sys.exit(7 if mode == 'nonzero' else 2 if mode == 'exit_mismatch' else 0)\n"
     )
-    (package / "orders.py").write_text(script, encoding="utf-8")
+    python = install_test_worker(tmp_path / "worker-venv", script)
     output = tmp_path / "result"
-    result = subprocess.run(
-        [
-            java_command(),
-            "-jar",
-            str(JAR),
-            "analyze",
-            "--input",
-            str(clean),
-            "--python",
-            sys.executable,
-            "--output",
-            str(output),
-        ],
-        cwd=fake,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
+    result = analyze(clean, output, python=python, cwd=tmp_path)
     assert result.returncode == 1, result.stderr
     assert not (output / "manifest.json").exists()
     assert (output / "fatal.json").is_file()

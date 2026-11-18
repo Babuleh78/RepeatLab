@@ -89,7 +89,7 @@ final class AnalyzeCommand {
     }
 
     static int worker(String python, Path clean, Path orders, Path output) throws IOException, InterruptedException {
-        return runProcess(List.of(python, "-m", "repeatlab.orders", "--input", clean.toAbsolutePath().toString(),
+        return runProcess(List.of(python, "-I", "-m", "repeatlab.orders", "--input", clean.toAbsolutePath().toString(),
                 "--output", orders.toAbsolutePath().toString()), output);
     }
 
