@@ -213,6 +213,67 @@ def test_all_orders_must_fit_declared_coverage(
 
 
 @pytest.mark.parametrize(
+    ("alias_for", "observed_until"),
+    [
+        (None, UNTIL),
+        (None, "2020-01-10T00:00:00"),
+        ("input", UNTIL),
+        ("output_parent", UNTIL),
+    ],
+    ids=["direct", "direct-out-of-window", "input-alias", "output-parent-alias"],
+)
+def test_cohorts_reject_output_inside_orders(
+    tmp_path: Path, alias_for: str | None, observed_until: str
+) -> None:
+    orders = tmp_path / "orders"
+    output_parent = orders
+    source = orders
+    if alias_for is not None:
+        output_parent = orders / "child"
+        alias = tmp_path / "orders-alias"
+        target = orders if alias_for == "input" else output_parent
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            if getattr(error, "winerror", None) in (5, 1314):
+                pytest.skip("creating symlinks requires host permission")
+            raise
+        if alias_for == "input":
+            source = alias
+        else:
+            output_parent = alias
+
+    clean = run_clean(tmp_path / "source", [("A1", "P", "1", "2020-01-15T00:00:00", "1", "A")])
+    write_orders_dataset(clean, orders)
+    (orders / "child").mkdir()
+
+    def snapshot() -> dict[Path, bytes | None]:
+        return {
+            path.relative_to(orders): path.read_bytes() if path.is_file() else None
+            for path in orders.rglob("*")
+        }
+
+    original = snapshot()
+    output = output_parent / "nested-result"
+    result = run_cohorts(source, output, observed_until=observed_until)
+    assert result.returncode == 1, result.stderr
+    assert snapshot() == original
+    assert not output.exists()
+    assert json.loads(result.stderr.splitlines()[-1])["stage"] == "output_reservation"
+
+
+def test_cohorts_missing_orders_writes_external_diagnostics(tmp_path: Path) -> None:
+    orders = tmp_path / "missing-orders"
+    output = tmp_path / "cohorts"
+
+    result = run_cohorts(orders, output)
+    assert result.returncode == 1, result.stderr
+    assert document(output / "fatal.json")["stage"] == "orders_validation"
+    assert not (output / "manifest.json").exists()
+    assert not orders.exists()
+
+
+@pytest.mark.parametrize(
     ("observed_from", "observed_until"),
     [
         (FROM, FROM),
@@ -241,7 +302,7 @@ def test_service_only_input_has_no_cohorts_and_modified_orders_fail(tmp_path: Pa
     clean = run_clean(tmp_path / "source", [("S", "SERVICE", "1", FROM, "1", "A")])
     orders = tmp_path / "orders"
     write_orders_dataset(clean, orders)
-    output = tmp_path / "cohorts"
+    output = tmp_path / "orders-cohorts"
 
     result = run_cohorts(orders, output)
     assert result.returncode == 0, result.stderr

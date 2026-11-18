@@ -2,6 +2,7 @@ package io.repeatlab.ingestion;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -43,12 +44,25 @@ final class CohortsCommand {
         String stageName = "output_reservation";
         TransactionalOutput transaction = null;
         try {
-            transaction = new TransactionalOutput(arguments.output());
+            Path input = arguments.input();
+            Path output = arguments.output().toAbsolutePath();
+            Path outputParent = output.getParent();
+            if (outputParent != null) {
+                Path realParent = outputParent.toRealPath();
+                // Invalid input paths still go through orders validation and its diagnostics.
+                if (Files.isDirectory(input)) {
+                    input = input.toRealPath();
+                    if (realParent.startsWith(input))
+                        throw new IOException("Output directory is inside the input orders directory");
+                }
+                output = realParent.resolve(output.getFileName());
+            }
+            transaction = new TransactionalOutput(output);
             Path stage = transaction.staging();
 
             stageName = "orders_validation";
             Path snapshot = stage.resolve("verified-orders");
-            OrdersDataset dataset = new OrdersDataset(arguments.input(), snapshot);
+            OrdersDataset dataset = new OrdersDataset(input, snapshot);
             AnalyzeCommand.removeTree(snapshot);
 
             stageName = "observation_validation";

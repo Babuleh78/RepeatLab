@@ -142,7 +142,8 @@ final class OrdersDataset {
             catch (DateTimeParseException failure) { throw new IOException("Invalid timestamp", failure); }
             StrictJson.require(time.getYear() >= 1 && time.getYear() <= 9999, "Invalid timestamp year");
             String kind = StrictJson.text(node.get("kind"));
-            StrictJson.require(Set.of("sale", "cancellation").contains(kind), "Invalid kind");
+            boolean cancellation = invoice.startsWith("c") || invoice.startsWith("C");
+            StrictJson.require(kind.equals(cancellation ? "cancellation" : "sale"), "Order kind does not match invoice prefix");
             JsonNode qty = node.get("quantity");
             StrictJson.require(qty.isIntegralNumber(), "Quantity must be an integer");
             BigInteger quantity = qty.bigIntegerValue();
@@ -151,12 +152,14 @@ final class OrdersDataset {
             String coefficient = amount.split("[eE]", 2)[0].replace(".", "").replace("+", "").replace("-", "");
             boolean zero = coefficient.chars().allMatch(c -> c == '0');
             int sign = zero ? 0 : amount.startsWith("-") ? -1 : 1;
-            int expectedSign = kind.equals("sale") ? 1 : -1;
+            int expectedSign = cancellation ? -1 : 1;
             StrictJson.require(quantity.signum() == expectedSign && sign == expectedSign, "Invalid quantity/amount sign");
             long lineCount = StrictJson.integer(node.get("line_count"), 1, Long.MAX_VALUE);
+            StrictJson.require(quantity.abs().compareTo(BigInteger.valueOf(lineCount)) >= 0,
+                    "Order quantity magnitude is less than its product line count");
             long stocks = StrictJson.integer(node.get("stock_code_count"), 1, lineCount);
             orders.add(new Order(invoice, customer, time, kind, lineCount, quantity, stocks, amount));
-            if (kind.equals("sale")) sales++; else cancellations++;
+            if (cancellation) cancellations++; else sales++;
             if (customer == null) missing++;
             lines = Math.addExact(lines, lineCount);
         }
@@ -181,7 +184,7 @@ final class OrdersDataset {
         Map<String, Set<String>> stocks = new HashMap<>();
         Map<String, Lineage> lineage = new HashMap<>();
         String previous = null;
-        long services = 0;
+        long services = 0, serviceOnlyRows = 0, knownMissingCustomerRows = 0;
         for (JsonNode node : rows(copy.resolve("lineage.jsonl"))) {
             StrictJson.keys(node, "schema", "schema_version", "event_id", "invoice_id", "order_key", "disposition");
             schema(node);
@@ -204,12 +207,14 @@ final class OrdersDataset {
                         "Lineage service flag does not match clean event");
             }
             lineage.put(id, new Lineage(invoice, service));
+            Order order = byInvoice.get(invoice);
+            if (order != null && order.customer() == null) knownMissingCustomerRows++;
             if (service) {
                 StrictJson.require(node.get("order_key").isNull(), "Service maps to order");
                 services++;
+                if (order == null) serviceOnlyRows++;
             } else {
                 equalText(node, "order_key", invoice);
-                Order order = byInvoice.get(invoice);
                 StrictJson.require(order != null, "Lineage maps to missing order");
                 lines.merge(invoice, 1L, Math::addExact);
                 if (event != null) {
@@ -232,12 +237,19 @@ final class OrdersDataset {
         StrictJson.require(count(counts, "included_product_rows") == count(sourceCounts, "accepted_product_rows")
                 && services == count(sourceCounts, "accepted_service_rows")
                 && lineage.size() == count(sourceCounts, "accepted_rows"), "Source accepted accounting mismatch");
+        long missingCustomerRows = count(sourceCounts, "missing_customer_rows");
+        // A retained order fixes the customer for its invoice, including excluded service rows.
+        long unknownCustomerRows = serviceOnlyRows + count(sourceCounts, "quarantined_rows");
+        StrictJson.require(missingCustomerRows >= knownMissingCustomerRows
+                && missingCustomerRows - knownMissingCustomerRows <= unknownCustomerRows,
+                "Source missing customer count contradicts order lineage");
         readDuplicateGroups(copy, lineage);
     }
 
     private void readDuplicateGroups(Path copy, Map<String, Lineage> lineage) throws IOException {
         long groups = 0;
         Set<String> duplicated = new HashSet<>();
+        Map<String, Long> productDuplicateExcess = new HashMap<>();
         String previousGroup = null;
         for (JsonNode node : rows(copy.resolve("duplicates.jsonl"))) {
             StrictJson.keys(node, "schema", "schema_version", "event_ids"); schema(node);
@@ -255,8 +267,13 @@ final class OrdersDataset {
             }
             StrictJson.require(previousGroup == null || CODEPOINT.compare(previousGroup, first) < 0, "Duplicate groups not sorted");
             previousGroup = first; groups++;
+            if (!group.service()) productDuplicateExcess.merge(group.invoice(), ids.size() - 1L, Math::addExact);
         }
         requireCount("duplicate_groups", groups);
+        for (Order order : orders) {
+            long maxStocks = order.lines() - productDuplicateExcess.getOrDefault(order.invoice(), 0L);
+            StrictJson.require(order.stocks() <= maxStocks, "Order stock count contradicts product duplicate groups");
+        }
     }
 
     static List<JsonNode> rows(Path path) throws IOException {
