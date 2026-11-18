@@ -22,7 +22,7 @@ uv build --no-sources
 
 Java-часть требует Temurin 25.0.5+8. Maven 3.10.0 закреплён Wrapper с SHA-256;
 на Windows используйте `./mvnw.cmd`. Библиотеки POI 6.0.0, Jackson 2.21.8 LTS,
-JUnit 6.1.3 и build plugins закреплены в `java/pom.xml`; транзитивные версии
+JUnit 6.1.3, DuckDB JDBC 2.0.0.1 и build plugins закреплены в `java/pom.xml`; транзитивные версии
 задаются опубликованными POM этих релизов. Изменения зависимостей проверяйте вместе
 с Java и Python тестами. Java компилируется с `-Xlint` и `-Werror`.
 
@@ -46,3 +46,12 @@ Clean-тесты проходят весь путь ingest → clean → Python 
 полное покрытие dispositions и согласованные service_codes. Используйте буквальные
 точные значения, включая субмикросекундные границы и Unicode ID. Не подменяйте
 точную проверку счёта сравнением уже усечённого времени.
+
+Analyze-тесты запускают JAR → установленный Python worker → JDBC → JSONL.
+Сначала выполните Maven verify и uv sync, затем pytest; отсутствие worker/JDBC
+не является причиной пропускать тесты. SQL находится в корневом `sql/` и попадает
+в classpath при сборке. Изменяя SQL, проверяйте точные суммы, разделение kind,
+известных customer, рациональные доли, empty/services и унаследованный карантин.
+Численные границы проверяются до JDBC, групповой overflow — реальным SQL SUM.
+Ошибки SQL должны сохранять completed orders без внешнего completed manifest.
+Для ручной проверки используйте новый output и явный путь к Python 3.12.
