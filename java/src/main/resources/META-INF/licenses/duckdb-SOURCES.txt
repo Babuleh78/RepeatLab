@@ -1,0 +1,15 @@
+DuckDB notices included by RepeatLab for the distributed embedded JDBC library.
+
+Artifact: org.duckdb:duckdb_jdbc:2.0.0.1
+JDBC release: https://github.com/duckdb/duckdb-java/releases/tag/v2.0.0.1
+JDBC source commit: 81150171f5d9c6c22728970558c507a13ee97f15
+License file: duckdb-jdbc-2.0.0.1-LICENSE.txt
+Exact source: https://raw.githubusercontent.com/duckdb/duckdb-java/v2.0.0.1/LICENSE
+
+Embedded engine: DuckDB 2.0.0
+License file: duckdb-2.0.0-LICENSE.txt
+Exact source: https://raw.githubusercontent.com/duckdb/duckdb/v2.0.0/LICENSE
+
+Retrieved 2026-11-16. License files are included verbatim, retaining their respective
+copyright years (2018-2025 for JDBC; 2018-2026 for the engine). Both use the MIT license.
+The upstream Maven artifact does not itself include these notices as ZIP entries.
