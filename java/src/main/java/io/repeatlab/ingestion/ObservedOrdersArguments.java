@@ -1,8 +1,10 @@
 package io.repeatlab.ingestion;
 
 import java.io.IOException;
+import java.nio.file.FileSystemLoopException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -10,6 +12,7 @@ import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoField;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -71,20 +74,40 @@ record ObservedOrdersArguments(Path input, Path clean, Path output, LocalDateTim
         Path parent = target.getParent();
         if (parent != null) {
             Path realParent = parent.toRealPath();
-            source = resolveSource(source, realParent, "orders");
-            if (cleanSource != null) cleanSource = resolveSource(cleanSource, realParent, "clean");
-            target = realParent.resolve(target.getFileName());
+            target = realParent.resolve(target.getFileName()).normalize();
+            source = resolveSource(source, target, "orders");
+            if (cleanSource != null) cleanSource = resolveSource(cleanSource, target, "clean");
         }
         return new ObservedOrdersArguments(source, cleanSource, target, from, until);
     }
 
-    private static Path resolveSource(Path source, Path realOutputParent, String name) throws IOException {
-        // Leave missing inputs to dataset validation so a reserved output can record diagnostics.
-        if (!Files.isDirectory(source)) return source;
-        Path realSource = source.toRealPath();
-        if (realOutputParent.startsWith(realSource))
-            throw new IOException("Output directory is inside the input " + name + " directory");
-        return realSource;
+    private static Path resolveSource(Path source, Path target, String name) throws IOException {
+        boolean exists = Files.isDirectory(source);
+        Path location = exists ? source.toRealPath() : prospectivePath(source);
+        if (target.startsWith(location) || location.startsWith(target))
+            throw new IOException("Output directory overlaps the input " + name + " directory");
+        // Let normal validation diagnose a missing input at its original path.
+        return exists ? location : source;
+    }
+
+    private static Path prospectivePath(Path source) throws IOException {
+        Path path = source.toAbsolutePath();
+        Set<Path> followed = new HashSet<>();
+        while (true) {
+            Path prefix = path;
+            while (prefix != null && !Files.exists(prefix, LinkOption.NOFOLLOW_LINKS))
+                prefix = prefix.getParent();
+            if (prefix == null) return path.normalize();
+            Path suffix = prefix.relativize(path);
+            if (!Files.isSymbolicLink(prefix) || Files.exists(prefix))
+                return prefix.toRealPath().resolve(suffix).normalize();
+
+            // A dangling link in the input could become live when we reserve the output.
+            Path parent = prefix.getParent().toRealPath();
+            Path link = parent.resolve(prefix.getFileName());
+            if (!followed.add(link)) throw new FileSystemLoopException(link.toString());
+            path = parent.resolve(Files.readSymbolicLink(link)).resolve(suffix);
+        }
     }
 
     void requireCoverage(List<OrdersDataset.Order> orders) throws IOException {

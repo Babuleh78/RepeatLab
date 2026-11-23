@@ -194,8 +194,8 @@ final class OrdersDataset {
         for (JsonNode node : rows(copy.resolve("lineage.jsonl"))) {
             StrictJson.keys(node, "schema", "schema_version", "event_id", "invoice_id", "order_key", "disposition");
             schema(node);
-            // The in-process worker is matched directly against its clean input. Consumer
-            // commands also validate the digest shape of the persisted exchange.
+            // Analyze checks worker-produced IDs against the clean snapshot passed to the worker.
+            // Commands that open a persisted orders dataset also check the SHA-256 format.
             String id = events == null || products != null
                     ? StrictJson.hash(node.get("event_id")) : StrictJson.text(node.get("event_id"));
             StrictJson.require(previous == null || CODEPOINT.compare(previous, id) < 0, "Lineage not uniquely sorted");

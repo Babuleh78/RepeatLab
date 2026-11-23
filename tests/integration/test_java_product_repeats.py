@@ -207,22 +207,85 @@ def test_coverage_checks_anonymous_order_and_argument_bounds(
     assert not (output / "manifest.json").exists()
 
 
+def directory_alias(link: Path, target: Path) -> Path:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if getattr(error, "winerror", None) in (5, 1314):
+            pytest.skip("creating symlinks requires host permission")
+        raise
+    return link
+
+
 @pytest.mark.parametrize("aliased", [False, True], ids=["direct", "symlink"])
 def test_output_cannot_be_created_in_either_input(
     tmp_path: Path, source_pair: tuple[Path, Path], aliased: bool
 ) -> None:
     clean, orders = source_pair
     for source in (clean, orders):
-        parent = source
-        if aliased:
-            parent = tmp_path / source.name
-            try:
-                parent.symlink_to(source, target_is_directory=True)
-            except OSError as error:
-                if getattr(error, "winerror", None) in (5, 1314):
-                    pytest.skip("creating symlinks requires host permission")
-                raise
+        parent = directory_alias(tmp_path / source.name, source) if aliased else source
         output = parent / "nested-output"
         result = run_repeats(clean, orders, output)
         assert result.returncode == 1, result.stderr
         assert not output.exists()
+
+
+@pytest.mark.parametrize("missing_input", ["clean", "orders"])
+@pytest.mark.parametrize("aliased", [False, True], ids=["direct", "two-parent-aliases"])
+def test_reserving_output_preserves_absent_input(
+    tmp_path: Path, source_pair: tuple[Path, Path], missing_input: str, aliased: bool
+) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    input_parent = output_parent = real_parent
+    if aliased:
+        input_parent = directory_alias(tmp_path / "input-parent", real_parent)
+        output_parent = directory_alias(tmp_path / "output-parent", real_parent)
+    absent = input_parent / "missing"
+    clean, orders = source_pair
+    if missing_input == "clean":
+        clean = absent
+    else:
+        orders = absent
+    result = run_repeats(clean, orders, output_parent / "missing")
+    assert result.returncode == 1, result.stderr
+    assert not (real_parent / "missing").exists()
+
+
+@pytest.mark.parametrize("missing_input", ["clean", "orders"])
+def test_absent_input_writes_diagnostic_in_separate_output(
+    tmp_path: Path, source_pair: tuple[Path, Path], missing_input: str
+) -> None:
+    absent, output = tmp_path / "missing", tmp_path / "out"
+    clean, orders = source_pair
+    if missing_input == "clean":
+        clean = absent
+    else:
+        orders = absent
+    result = run_repeats(clean, orders, output)
+    assert result.returncode == 1, result.stderr
+    assert not absent.exists()
+    assert document(output / "fatal.json")["status"] == "failed"
+    assert not (output / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("missing_input", ["clean", "orders"])
+def test_dangling_input_link_preserves_its_missing_target(
+    tmp_path: Path, source_pair: tuple[Path, Path], missing_input: str
+) -> None:
+    target = tmp_path / "future-output"
+    relative_target = Path(target.name)
+    link = directory_alias(tmp_path / "source-link", relative_target)
+    clean, orders = source_pair
+    if missing_input == "clean":
+        clean = link
+    else:
+        orders = link
+    separate = tmp_path / "diagnostics"
+    for output in (target, separate):
+        result = run_repeats(clean, orders, output)
+        assert result.returncode == 1, result.stderr
+        assert not target.exists()
+        assert link.readlink() == relative_target
+    assert document(separate / "fatal.json")["status"] == "failed"
+    assert not (separate / "manifest.json").exists()
