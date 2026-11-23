@@ -16,10 +16,11 @@ public final class Main {
             Usage: java -jar repeatlab-data.jar ingest --input <xlsx> --output <new-directory>
                    java -jar repeatlab-data.jar clean --input <ingest-dir> --config <json> --output <new-directory>
                    java -jar repeatlab-data.jar analyze --input <clean-dir> --python <python-executable> --output <new-directory>
+                   java -jar repeatlab-data.jar cohorts --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
                    java -jar repeatlab-data.jar --help
             Exit codes: 0 completed; 2 completed with data errors; 1 file/structure/I/O failure;
                         64 invalid invocation. Warnings alone return 0.
-            A completed manifest is required for consumption of ingest or clean datasets.
+            A completed manifest is required for consumption of ingest, clean, or orders datasets.
             """;
 
     private Main() {}
@@ -28,6 +29,11 @@ public final class Main {
 
     public static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) { out.print(HELP); return 0; }
+        if (args.length > 0 && args[0].equals("cohorts")) {
+            int result = CohortsCommand.run(args, out, err);
+            if (result == 64) err.print(HELP);
+            return result;
+        }
         if (args.length > 0 && args[0].equals("analyze")) {
             int result = AnalyzeCommand.run(args, out, err);
             if (result == 64) err.print(HELP);
