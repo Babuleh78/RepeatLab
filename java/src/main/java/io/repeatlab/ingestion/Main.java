@@ -18,6 +18,7 @@ public final class Main {
                    java -jar repeatlab-data.jar analyze --input <clean-dir> --python <python-executable> --output <new-directory>
                    java -jar repeatlab-data.jar cohorts --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
                    java -jar repeatlab-data.jar sales-profile --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
+                   java -jar repeatlab-data.jar product-repeats --input <orders-dir> --clean <clean-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
                    java -jar repeatlab-data.jar --help
             Exit codes: 0 completed; 2 completed with data errors; 1 file/structure/I/O failure;
                         64 invalid invocation. Warnings alone return 0.
@@ -30,6 +31,11 @@ public final class Main {
 
     public static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) { out.print(HELP); return 0; }
+        if (args.length > 0 && args[0].equals("product-repeats")) {
+            int result = ProductRepeatsCommand.run(args, out, err);
+            if (result == 64) err.print(HELP);
+            return result;
+        }
         if (args.length > 0 && args[0].equals("sales-profile")) {
             int result = SalesProfileCommand.run(args, out, err);
             if (result == 64) err.print(HELP);

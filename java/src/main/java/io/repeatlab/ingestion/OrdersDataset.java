@@ -56,6 +56,12 @@ final class OrdersDataset {
     }
 
     OrdersDataset(Path source, Path clean, Path copy) throws IOException {
+        this(source, clean, copy, null);
+    }
+
+    OrdersDataset(Path source, Path clean, Path copy, Map<String, Set<String>> products) throws IOException {
+        StrictJson.require(products == null || clean != null && products.isEmpty(),
+                "Product memberships require a clean snapshot and an empty destination");
         Files.createDirectory(copy);
         Files.copy(source.resolve("manifest.json"), copy.resolve("manifest.json"));
         manifestHash = Json.hash(copy.resolve("manifest.json"));
@@ -102,7 +108,7 @@ final class OrdersDataset {
         StrictJson.require(counts.equals(audit.get("counts")) && sourceCounts.equals(audit.get("source_clean_counts")), "Audit mismatch");
         if (clean != null) verifyCleanMetadata(clean, input);
         readOrders(copy);
-        readLineage(copy, clean);
+        readLineage(copy, clean, products);
     }
 
     private void verifyCleanMetadata(Path clean, JsonNode input) throws IOException {
@@ -175,7 +181,7 @@ final class OrdersDataset {
         return events;
     }
 
-    private void readLineage(Path copy, Path clean) throws IOException {
+    private void readLineage(Path copy, Path clean, Map<String, Set<String>> products) throws IOException {
         Map<String, JsonNode> events = clean == null ? null : readCleanEvents(clean);
         Map<String, Order> byInvoice = new HashMap<>();
         for (Order order : orders) byInvoice.put(order.invoice(), order);
@@ -188,9 +194,10 @@ final class OrdersDataset {
         for (JsonNode node : rows(copy.resolve("lineage.jsonl"))) {
             StrictJson.keys(node, "schema", "schema_version", "event_id", "invoice_id", "order_key", "disposition");
             schema(node);
-            // The standalone reader can validate the digest shape; clean-bound validation
-            // can match the identifier itself against the verified source.
-            String id = events == null ? StrictJson.hash(node.get("event_id")) : StrictJson.text(node.get("event_id"));
+            // The in-process worker is matched directly against its clean input. Consumer
+            // commands also validate the digest shape of the persisted exchange.
+            String id = events == null || products != null
+                    ? StrictJson.hash(node.get("event_id")) : StrictJson.text(node.get("event_id"));
             StrictJson.require(previous == null || CODEPOINT.compare(previous, id) < 0, "Lineage not uniquely sorted");
             previous = id;
             String invoice = identifier(node.get("invoice_id"));
@@ -223,7 +230,7 @@ final class OrdersDataset {
                             && order.time().equals(LocalDateTime.parse(StrictJson.text(event.get("event_time")))), "Order/clean metadata mismatch");
                     StrictJson.require(event.get("quantity").isIntegralNumber(), "Invalid clean quantity");
                     quantities.merge(invoice, event.get("quantity").bigIntegerValue(), BigInteger::add);
-                    stocks.computeIfAbsent(invoice, ignored -> new HashSet<>()).add(StrictJson.text(event.get("stock_code")));
+                    stocks.computeIfAbsent(invoice, ignored -> new HashSet<>()).add(identifier(event.get("stock_code")));
                 }
             }
         }
@@ -244,6 +251,7 @@ final class OrdersDataset {
                 && missingCustomerRows - knownMissingCustomerRows <= unknownCustomerRows,
                 "Source missing customer count contradicts order lineage");
         readDuplicateGroups(copy, lineage);
+        if (products != null) products.putAll(stocks);
     }
 
     private void readDuplicateGroups(Path copy, Map<String, Lineage> lineage) throws IOException {
