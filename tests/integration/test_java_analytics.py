@@ -111,7 +111,7 @@ def test_analyze_preserves_control_identifiers_accepted_by_clean_policy(
     )
 
 
-def install_test_worker(environment: Path, script: str) -> Path:
+def install_test_worker(environment: Path, script: str, *, module: str = "orders") -> Path:
     """Install a controlled stdlib-only package into a disposable interpreter's site-packages."""
     venv.EnvBuilder(with_pip=False).create(environment)
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -128,7 +128,7 @@ def install_test_worker(environment: Path, script: str) -> Path:
     package = site / "repeatlab"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "orders.py").write_text(script, encoding="utf-8")
+    (package / f"{module}.py").write_text(script, encoding="utf-8")
     return python
 
 

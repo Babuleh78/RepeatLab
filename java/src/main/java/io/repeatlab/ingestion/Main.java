@@ -16,6 +16,7 @@ public final class Main {
             Usage: java -jar repeatlab-data.jar ingest --input <xlsx> --output <new-directory>
                    java -jar repeatlab-data.jar clean --input <ingest-dir> --config <json> --output <new-directory>
                    java -jar repeatlab-data.jar analyze --input <clean-dir> --python <python-executable> --output <new-directory>
+                   java -jar repeatlab-data.jar duplicate-sensitivity --input <clean-dir> --python <python-executable> --output <new-directory>
                    java -jar repeatlab-data.jar cohorts --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
                    java -jar repeatlab-data.jar sales-profile --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
                    java -jar repeatlab-data.jar product-repeats --input <orders-dir> --clean <clean-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
@@ -31,6 +32,11 @@ public final class Main {
 
     public static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) { out.print(HELP); return 0; }
+        if (args.length > 0 && args[0].equals("duplicate-sensitivity")) {
+            int result = DuplicateSensitivityCommand.run(args, out, err);
+            if (result == 64) err.print(HELP);
+            return result;
+        }
         if (args.length > 0 && args[0].equals("product-repeats")) {
             int result = ProductRepeatsCommand.run(args, out, err);
             if (result == 64) err.print(HELP);
