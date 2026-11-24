@@ -1,12 +1,9 @@
 package io.repeatlab.ingestion;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
@@ -14,16 +11,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 
 /** Executes the cohort queries over observed sales without loading quantities or money. */
 final class CohortAnalytics {
     record Result(String engine, Map<String, String> sqlHashes, long repeatRows, long activityRows) {}
-
-    @FunctionalInterface
-    private interface Row {
-        Map<String, Object> encode(ResultSet row) throws SQLException;
-    }
 
     private static final int INSERT_BATCH_SIZE = 1024;
 
@@ -32,22 +23,14 @@ final class CohortAnalytics {
     static Result run(List<OrdersDataset.Order> orders, LocalDateTime observedFrom,
                       LocalDateTime observedUntil, Path stage) throws IOException, SQLException {
         Path spill = Files.createDirectory(stage.resolve("duckdb-temp"));
-        Properties config = new Properties();
-        config.setProperty("memory_limit", "1GB");
-        config.setProperty("threads", "1");
-        config.setProperty("temp_directory", spill.toAbsolutePath().toString());
         Result result;
-        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:", config)) {
-            String version;
-            try (var query = connection.createStatement(); var rows = query.executeQuery("SELECT version()")) {
-                if (!rows.next()) throw new SQLException("DuckDB version is unavailable");
-                version = rows.getString(1);
-            }
+        try (Connection connection = DuckDbReports.connect(spill)) {
+            String version = DuckDbReports.version(connection);
             loadSales(connection, orders);
             Map<String, String> sqlHashes = new LinkedHashMap<>();
-            long repeatRows = writeRows(connection, stage, "repeat_rates", sqlHashes,
+            long repeatRows = DuckDbReports.writeRows(connection, stage, "repeat_rates", sqlHashes,
                     CohortAnalytics::repeatRow, observedUntil);
-            long activityRows = writeRows(connection, stage, "cohort_activity", sqlHashes,
+            long activityRows = DuckDbReports.writeRows(connection, stage, "cohort_activity", sqlHashes,
                     CohortAnalytics::activityRow, observedFrom, observedUntil);
             result = new Result(version, Map.copyOf(sqlHashes), repeatRows, activityRows);
         }
@@ -76,32 +59,6 @@ final class CohortAnalytics {
         }
         connection.commit();
         connection.setAutoCommit(true);
-    }
-
-    private static long writeRows(Connection connection, Path stage, String name, Map<String, String> sqlHashes,
-                                  Row encoder, LocalDateTime... bounds) throws IOException, SQLException {
-        String sqlName = name + ".sql";
-        String sql;
-        try (var input = CohortAnalytics.class.getResourceAsStream("/sql/" + sqlName)) {
-            if (input == null) throw new IOException("Missing packaged SQL: " + sqlName);
-            sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
-        }
-        sqlHashes.put(sqlName, Json.hashText(sql));
-        long count = 0;
-        try (var query = connection.prepareStatement(sql)) {
-            for (int i = 0; i < bounds.length; i++) {
-                query.setString(i + 1, bounds[i].format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
-            }
-            try (var rows = query.executeQuery();
-                 var writer = Files.newBufferedWriter(stage.resolve(name + ".jsonl"), StandardCharsets.UTF_8,
-                         StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                while (rows.next()) {
-                    Json.line(writer, encoder.encode(rows));
-                    count = Math.incrementExact(count);
-                }
-            }
-        }
-        return count;
     }
 
     private static Map<String, Object> repeatRow(ResultSet row) throws SQLException {
