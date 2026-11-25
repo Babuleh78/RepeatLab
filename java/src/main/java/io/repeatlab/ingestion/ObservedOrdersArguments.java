@@ -58,7 +58,7 @@ record ObservedOrdersArguments(Path input, Path clean, Path output, LocalDateTim
         }
     }
 
-    private static LocalDateTime parseBound(String value) {
+    static LocalDateTime parseBound(String value) {
         if (!BOUND_PATTERN.matcher(value).matches())
             throw new DateTimeParseException("Expected local timestamp with seconds and up to six fractional digits",
                     value, 0);
@@ -68,20 +68,19 @@ record ObservedOrdersArguments(Path input, Path clean, Path output, LocalDateTim
     }
 
     ObservedOrdersArguments resolvePaths() throws IOException {
-        Path source = input;
-        Path cleanSource = clean;
-        Path target = output.toAbsolutePath();
-        Path parent = target.getParent();
-        if (parent != null) {
-            Path realParent = parent.toRealPath();
-            target = realParent.resolve(target.getFileName()).normalize();
-            source = resolveSource(source, target, "orders");
-            if (cleanSource != null) cleanSource = resolveSource(cleanSource, target, "clean");
-        }
+        Path target = resolveOutput(output);
+        Path source = resolveSource(input, target, "orders");
+        Path cleanSource = clean == null ? null : resolveSource(clean, target, "clean");
         return new ObservedOrdersArguments(source, cleanSource, target, from, until);
     }
 
-    private static Path resolveSource(Path source, Path target, String name) throws IOException {
+    static Path resolveOutput(Path output) throws IOException {
+        Path target = output.toAbsolutePath();
+        Path parent = target.getParent();
+        return parent == null ? target : parent.toRealPath().resolve(target.getFileName()).normalize();
+    }
+
+    static Path resolveSource(Path source, Path target, String name) throws IOException {
         boolean exists = Files.isDirectory(source);
         Path location = exists ? source.toRealPath() : prospectivePath(source);
         if (target.startsWith(location) || location.startsWith(target))
