@@ -34,7 +34,7 @@ class DuplicateSensitivityAnalyticsTest {
                 event("C1", date, null, "-" + large, "335E-1103"), event("D", date, null, "2", "2"),
                 event("A", date, "buyer", large, "1E-1100"), event("C1", date, null, "-" + large, "335E-1103"),
                 event("E", "9999-12-01T00:00:00.000000", "buyer", "1", "1")));
-        var result = DuplicateSensitivityAnalytics.run(facts, temp, clean);
+        var result = runWithPolicy(facts, temp, clean);
         assertEquals(5, result.orders());
         assertEquals(7, result.productLines());
         assertEquals(5, result.collapsedLines());
@@ -56,10 +56,19 @@ class DuplicateSensitivityAnalyticsTest {
     @Test void emptyFactsWriteEmptyReport() throws Exception {
         var service = event("S", "2010-01-01T00:00:00", "buyer", "1", "10");
         service.put("is_service", true);
-        var result = DuplicateSensitivityAnalytics.run(writeFacts(List.of()), temp, writeClean(List.of(service)));
+        service.put("stock_code", "SERVICE");
+        var result = runWithPolicy(writeFacts(List.of()), temp, writeClean(List.of(service)));
         assertEquals(0, result.orders());
         assertEquals(0, result.rows());
         assertEquals(0, Files.size(temp.resolve("duplicate_sensitivity.jsonl")));
+    }
+
+    @Test void aProductCannotBeSkippedAsAService() throws Exception {
+        var product = event("I", "2010-01-01T00:00:00", "buyer", "1", "10");
+        product.put("is_service", true);
+        Path facts = writeFacts(List.of()), clean = writeClean(List.of(product));
+        var failure = assertThrows(IOException.class, () -> runWithPolicy(facts, temp, clean));
+        assertTrue(failure.getMessage().contains("Service flag"));
     }
 
     @Test void rejectsInconsistentScenarioFactsBeforeAggregation() throws Exception {
@@ -67,7 +76,7 @@ class DuplicateSensitivityAnalyticsTest {
         Path clean = writeClean(List.of(event("A", date, "buyer", "6", "1"), event("A", date, "buyer", "6", "1")));
         var valid = order("A", date, true, values(2, "12", "12"), values(1, "6", "6"));
         Path good = Files.createTempDirectory(temp, "valid");
-        assertEquals(1, DuplicateSensitivityAnalytics.run(writeFacts(good, List.of(valid)), good, clean).orders());
+        assertEquals(1, runWithPolicy(writeFacts(good, List.of(valid)), good, clean).orders());
         var bad = new ArrayList<Map<String, Object>>();
         bad.add(order("A", "2010-02-30T00:00:00", true, values(1, "1", "8"), values(1, "1", "8")));
         bad.add(order("A", date + ".0000001", true, values(1, "1", "8"), values(1, "1", "8")));
@@ -79,10 +88,10 @@ class DuplicateSensitivityAnalyticsTest {
         bad.add(order("A", date, true, values(2, "1", "8"), values(1, "1", "4")));
         for (var row : bad) {
             Path stage = Files.createTempDirectory(temp, "invalid");
-            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(row)), stage, clean));
+            assertThrows(IOException.class, () -> runWithPolicy(writeFacts(stage, List.of(row)), stage, clean));
         }
         Path stage = Files.createTempDirectory(temp, "twice");
-        assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(valid, valid)), stage, clean));
+        assertThrows(IOException.class, () -> runWithPolicy(writeFacts(stage, List.of(valid, valid)), stage, clean));
     }
 
     @Test void refusesGlobalScaleThatWouldRoundOrOverflowAndGroupTotalsBeyond38Digits() throws Exception {
@@ -93,12 +102,12 @@ class DuplicateSensitivityAnalyticsTest {
             var v = values(1, "1", amount);
             Path clean = writeClean(List.of(event("A", date, "buyer", "1", "9".repeat(38)), event("B", date, null, "1", amount)));
             Path facts = writeFacts(stage, List.of(order("A", date, true, max, max), order("B", date, false, v, v)));
-            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(facts, stage, clean));
+            assertThrows(IOException.class, () -> runWithPolicy(facts, stage, clean));
         }
         var one = values(1, "1", "1");
         Path facts = writeFacts(List.of(order("A", date, true, max, max), order("B", date, true, one, one)));
         Path sameSegment = writeClean(List.of(event("A", date, "buyer", "1", "9".repeat(38)), event("B", date, "other", "1", "1")));
-        assertThrows(SQLException.class, () -> DuplicateSensitivityAnalytics.run(facts, temp, sameSegment));
+        assertThrows(SQLException.class, () -> runWithPolicy(facts, temp, sameSegment));
     }
 
     @Test void bindsWorkerOrdersAndSegmentMembershipToEveryCleanProductInvoice() throws Exception {
@@ -122,7 +131,7 @@ class DuplicateSensitivityAnalyticsTest {
         for (var facts : others) {
             Path stage = Files.createTempDirectory(temp, "replay");
             var failure = assertThrows(IOException.class,
-                    () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, facts), stage, clean));
+                    () -> runWithPolicy(writeFacts(stage, facts), stage, clean));
             assertTrue(failure.getMessage().contains("clean product"));
         }
     }
@@ -130,6 +139,12 @@ class DuplicateSensitivityAnalyticsTest {
     private static Map<String, Object> event(String key, String date, String customer, String units, String price) {
         return Json.object("invoice_id", key, "event_time", date, "kind", key.startsWith("C") ? "cancellation" : "sale",
                 "is_service", false, "customer_id", customer, "quantity", new BigInteger(units), "stock_code", "P", "unit_price", price);
+    }
+
+    private static DuplicateSensitivityAnalytics.Result runWithPolicy(Path facts, Path stage, Path clean)
+            throws IOException, SQLException {
+        var config = StrictJson.parse(Json.encode(Json.object("policy_version", "clean-v1", "service_codes", List.of("SERVICE"))));
+        return DuplicateSensitivityAnalytics.run(facts, stage, clean, CleaningPolicy.fromManifest(config));
     }
 
     private Path writeClean(List<Map<String, Object>> events) throws IOException {

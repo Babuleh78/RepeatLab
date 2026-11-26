@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -21,13 +20,13 @@ final class SensitivityOrderMembership {
 
     private SensitivityOrderMembership(CleanOrderLine first) { this.first = first; }
 
-    static Map<String, SensitivityOrderMembership> read(Path cleanEvents) throws IOException {
+    static Map<String, SensitivityOrderMembership> read(Path cleanEvents, CleaningPolicy policy) throws IOException {
         Map<String, SensitivityOrderMembership> invoices = new HashMap<>();
         Set<CleanOrderLine> distinct = new HashSet<>();
-        try (var reader = Files.newBufferedReader(cleanEvents)) {
+        try (var reader = ArtifactFiles.reader(cleanEvents)) {
             for (JsonNode node; (node = OrdersDataset.nextRow(reader)) != null;) {
-                if (node.path("is_service").isBoolean() && node.get("is_service").booleanValue()) continue;
-                CleanOrderLine event = CleanOrderLine.read(node);
+                CleanOrderLine event = CleanOrderLine.read(node, policy);
+                if (event.service()) continue;
                 var invoice = invoices.computeIfAbsent(event.invoice(), ignored -> new SensitivityOrderMembership(event));
                 StrictJson.require(invoice.first.time().equals(event.time()) && invoice.first.kind().equals(event.kind())
                         && Objects.equals(invoice.first.customer(), event.customer()), "Inconsistent clean product invoice");

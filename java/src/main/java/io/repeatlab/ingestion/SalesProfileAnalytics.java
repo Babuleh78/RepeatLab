@@ -60,7 +60,7 @@ final class SalesProfileAnalytics {
             connection.commit();
             result = new Result(version, scale, Map.copyOf(hashes), intervals, concentration);
         }
-        AnalyzeCommand.removeTree(spill);
+        TransactionalOutput.removeTree(spill);
         return result;
     }
 

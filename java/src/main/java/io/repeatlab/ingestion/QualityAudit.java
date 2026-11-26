@@ -24,10 +24,14 @@ final class QualityAudit {
     private final Map<String, Long> counts = new TreeMap<>();
     private final Map<String, Long> missing = new TreeMap<>();
     private final Map<Integer, Map<String, Long>> bySheet = new TreeMap<>();
-    private final Map<String, Object> duplicates = new HashMap<>();
+    private final Map<String, RowLocation> duplicates = new HashMap<>();
     private final Map<String, Set<String>> keys = new LinkedHashMap<>();
     private long errors, warnings, rows;
     private LocalDateTime min, max;
+
+    private record RowLocation(int sheet, String name, int row) {
+        Map<String, Object> encoded() { return Json.object("sheet_index", sheet, "sheet_name", name, "row_number", row); }
+    }
 
     QualityAudit(Writer issues, String sourceHash) {
         this(issues, sourceHash, false);
@@ -116,10 +120,9 @@ final class QualityAudit {
             extra.add(Json.object("column", cells.get(i).column(), "content", cells.get(i).content()));
         content.put("extra_columns", extra);
         String fingerprint = Json.hashText(Json.encode(content));
-        Object first = duplicates.putIfAbsent(fingerprint,
-                Json.object("sheet_index", sheet, "sheet_name", name, "row_number", row));
+        RowLocation first = duplicates.putIfAbsent(fingerprint, new RowLocation(sheet, name, row));
         if (first != null) issue("POSSIBLE_DUPLICATE", "warning", sheet, name, row, null,
-                "Same cell types, states and contents as an earlier data row; both retained", first);
+                "Same cell types, states and contents as an earlier data row; both retained", first.encoded());
     }
 
     private static BigDecimal decimal(Cell cell) {

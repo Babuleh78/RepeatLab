@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -85,6 +86,33 @@ def java_command() -> str:
     assert java, "Java 25 required: set JAVA_HOME before running pytest"
     assert JAR.is_file(), "Build the executable first: ./mvnw -B -f java/pom.xml verify"
     return java
+
+
+def test_failed_ingest_discards_snapshot_and_keeps_paths_out_of_diagnostics(tmp_path: Path) -> None:
+    source = tmp_path / "synthetic-private-filename.xlsx"
+    output = tmp_path / "result"
+    result = subprocess.run(
+        [
+            java_command(),
+            "-jar",
+            str(JAR),
+            "ingest",
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert {path.name for path in output.iterdir()} == {"fatal.json"}
+    fatal = (output / "fatal.json").read_bytes()
+    assert json.loads(fatal)["stage"] == "snapshot"
+    assert source.name.encode() not in fatal + result.stderr
+    if os.name == "posix":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o700
 
 
 def test_executable_includes_dependency_licenses_and_notices() -> None:

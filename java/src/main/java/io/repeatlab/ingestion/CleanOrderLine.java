@@ -9,7 +9,7 @@ import java.time.format.DateTimeParseException;
 /** Business values used to reconcile an order or duplicate group against accepted source rows. */
 record CleanOrderLine(String invoice, String customer, LocalDateTime time, String kind,
                       String stock, BigInteger quantity, ExactDecimal price, boolean service) {
-    static CleanOrderLine read(JsonNode node) throws IOException {
+    static CleanOrderLine read(JsonNode node, CleaningPolicy policy) throws IOException {
         String invoice = OrdersDataset.identifier(node.get("invoice_id"));
         String kind = StrictJson.text(node.get("kind"));
         boolean cancellation = invoice.startsWith("C") || invoice.startsWith("c");
@@ -21,8 +21,11 @@ record CleanOrderLine(String invoice, String customer, LocalDateTime time, Strin
         ExactDecimal price = ExactDecimal.parse(StrictJson.text(node.get("unit_price")));
         StrictJson.require(price.coefficient().signum() > 0, "Invalid clean unit price");
         StrictJson.require(node.path("is_service").isBoolean(), "Expected boolean is_service");
+        String stock = OrdersDataset.identifier(node.get("stock_code"));
+        StrictJson.require(node.get("is_service").booleanValue() == policy.service(stock),
+                "Service flag differs from the clean config");
         return new CleanOrderLine(invoice, StrictJson.nullableText(node.get("customer_id")),
-                timestamp(StrictJson.text(node.get("event_time"))), kind, OrdersDataset.identifier(node.get("stock_code")),
+                timestamp(StrictJson.text(node.get("event_time"))), kind, stock,
                 units, price, node.get("is_service").booleanValue());
     }
 

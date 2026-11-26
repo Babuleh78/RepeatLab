@@ -29,7 +29,7 @@ final class WorkerProcess {
             var stdout = drain(process.getInputStream(), output.resolve("worker.stdout.log"));
             var stderr = drain(process.getErrorStream(), output.resolve("worker.stderr.log"));
             if (!process.waitFor(seconds, TimeUnit.SECONDS))
-                throw new IOException("Worker exceeded timeout of " + seconds + " seconds");
+                throw new DiagnosticFailure("Worker exceeded timeout of " + seconds + " seconds");
             awaitLog(stdout);
             awaitLog(stderr);
             return process.exitValue();

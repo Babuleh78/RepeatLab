@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import os
 import shutil
 import sys
 from dataclasses import replace
@@ -363,6 +364,31 @@ def test_existing_output_is_preserved(tmp_path: Path, existing: str) -> None:
     assert target.read_bytes() == b"preserve"
 
 
+@pytest.mark.parametrize(
+    "name", ["manifest.json", "audit.json", "clean_events.jsonl", "dispositions.jsonl"]
+)
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_clean_readers_require_regular_members(tmp_path: Path, name: str, kind: str) -> None:
+    from repeatlab.cleaning import read_clean_dataset
+
+    source, output = tmp_path / "clean", tmp_path / "orders"
+    clean_dataset(source, [])
+    member = source / name
+    target = member.rename(source / "same-bytes")
+    if kind == "directory":
+        member.mkdir()
+    else:
+        try:
+            member.symlink_to(target)
+        except OSError:
+            pytest.skip("creating symlinks requires host permission")
+    with pytest.raises(ValueError, match="regular artifact"):
+        read_clean_dataset(source)
+    with pytest.raises(ValueError, match="regular artifact"):
+        worker().write_orders_dataset(source, output)
+    assert not (output / "manifest.json").exists()
+
+
 def test_existing_output_symlink_is_preserved(tmp_path: Path) -> None:
     source, output, target = tmp_path / "clean", tmp_path / "orders", tmp_path / "target"
     clean_dataset(source, [])
@@ -376,6 +402,18 @@ def test_existing_output_symlink_is_preserved(tmp_path: Path) -> None:
         worker().write_orders_dataset(source, output)
     assert (target / "keep").read_bytes() == b"preserve"
     assert set(item.name for item in target.iterdir()) == {"keep"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory permissions")
+def test_new_orders_directory_is_owner_only(tmp_path: Path) -> None:
+    source, output = tmp_path / "clean", tmp_path / "orders"
+    clean_dataset(source, [])
+    original = os.umask(0o022)
+    try:
+        worker().write_orders_dataset(source, output)
+    finally:
+        os.umask(original)
+    assert output.stat().st_mode & 0o777 == 0o700
 
 
 def test_snapshot_binds_input_hashes_to_processed_bytes(
@@ -450,6 +488,81 @@ def test_failed_atomic_publication_leaves_diagnostics_without_manifest(
         worker().write_orders_dataset(source, output)
     assert not (output / "manifest.json").exists()
     assert json.loads((output / "fatal.json").read_bytes())["stage"] == "publish_manifest"
+    assert {path.name for path in output.iterdir()} == {"fatal.json"}
+
+
+def test_worker_only_discards_its_own_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, output = tmp_path / "clean", tmp_path / "orders"
+    clean_dataset(source, [])
+    original_open = Path.open
+
+    def intercept(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if path == output / "lineage.jsonl" and mode == "xb":
+            # The first output is replaced, and the second has already been claimed.
+            first = output / "orders.jsonl"
+            first.rename(tmp_path / "moved-by-caller")
+            first.write_bytes(b"replacement")
+            with original_open(path, "xb") as stream:
+                stream.write(b"already here")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", intercept)
+    with pytest.raises(FileExistsError):
+        worker().write_orders_dataset(source, output)
+    assert (output / "orders.jsonl").read_bytes() == b"replacement"
+    assert (output / "lineage.jsonl").read_bytes() == b"already here"
+    assert {path.name for path in output.iterdir()} == {
+        "orders.jsonl",
+        "lineage.jsonl",
+        "fatal.json",
+    }
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, FileNotFoundError])
+def test_orders_survive_interruption_after_successful_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
+) -> None:
+    source, output = tmp_path / "clean", tmp_path / "orders"
+    clean_dataset(source, [])
+    replace_file = os.replace
+
+    def interrupt_after_rename(src: Path, dst: Path) -> None:
+        replace_file(src, dst)
+        raise error
+
+    monkeypatch.setattr(worker().os, "replace", interrupt_after_rename)
+    with pytest.raises(error):
+        worker().write_orders_dataset(source, output)
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert manifest["status"] == "completed"
+    for name, digest in manifest["artifacts"].items():
+        assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
+    assert not (output / "fatal.json").exists()
+
+
+def test_worker_continues_cleanup_after_an_unremovable_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, output = tmp_path / "clean", tmp_path / "orders"
+    clean_dataset(source, [])
+    original_unlink = Path.unlink
+
+    def fail_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == output / "lineage.jsonl":
+            raise PermissionError("private-marker")
+        original_unlink(path, missing_ok=missing_ok)
+
+    def fail_publish(src: Path, dst: Path) -> None:
+        raise OSError("private-marker")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+    monkeypatch.setattr(worker().os, "replace", fail_publish)
+    with pytest.raises(OSError):
+        worker().write_orders_dataset(source, output)
+    assert {p.name for p in output.iterdir()} == {"fatal.json", "lineage.jsonl"}
+    assert b"private-marker" not in (output / "fatal.json").read_bytes()
 
 
 def test_failed_artifact_write_cannot_publish_completion(
@@ -469,6 +582,7 @@ def test_failed_artifact_write_cannot_publish_completion(
         worker().write_orders_dataset(source, output)
     assert not (output / "manifest.json").exists()
     assert json.loads((output / "fatal.json").read_bytes())["stage"] == "write_artifacts"
+    assert {path.name for path in output.iterdir()} == {"fatal.json"}
 
 
 def test_snapshot_cleanup_failure_cannot_publish_completion(
@@ -488,6 +602,7 @@ def test_snapshot_cleanup_failure_cannot_publish_completion(
         worker().write_orders_dataset(source, output)
     assert not (output / "manifest.json").exists()
     assert json.loads((output / "fatal.json").read_bytes())["stage"] == "cleanup_snapshot"
+    assert {path.name for path in output.iterdir()} == {"fatal.json"}
 
 
 def test_run_diagnostic_failure_cannot_publish_completion(
@@ -507,6 +622,7 @@ def test_run_diagnostic_failure_cannot_publish_completion(
         worker().write_orders_dataset(source, output)
     assert not (output / "manifest.json").exists()
     assert json.loads((output / "fatal.json").read_bytes())["stage"] == "write_run"
+    assert {path.name for path in output.iterdir()} == {"fatal.json"}
 
 
 def test_unsupported_python_runtime_fails_before_reserving_output(

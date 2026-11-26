@@ -63,13 +63,13 @@ final class ProductRepeatsCommand {
         } catch (Exception | LinkageError failure) {
             Object fatal = Json.object("schema_version", 1, "status", "failed", "code", "PRODUCT_REPEATS_FAILED",
                     "stage", stageName, "error_type", failure.getClass().getSimpleName(),
-                    "message", failure.getMessage(), "started_at", started.toString(),
+                    "message", DiagnosticFailure.describe(failure), "started_at", started.toString(),
                     "finished_at", Instant.now().toString());
             try {
                 err.println(Json.encode(fatal));
                 if (transaction != null) transaction.failed(fatal);
             } catch (IOException diagnosticFailure) {
-                err.println("PRODUCT_REPEATS_FAILED: unable to persist diagnostics");
+                err.println("PRODUCT_REPEATS_FAILED: cleanup or failure diagnostics incomplete");
             }
             return 1;
         }
@@ -81,10 +81,10 @@ final class ProductRepeatsCommand {
         try {
             Path clean = Files.createDirectory(snapshots.resolve("clean"));
             for (String name : OrdersDataset.CLEAN_FILES)
-                Files.copy(arguments.clean().resolve(name), clean.resolve(name));
+                ArtifactFiles.copy(arguments.clean().resolve(name), clean.resolve(name));
             return new OrdersDataset(arguments.input(), clean, snapshots.resolve("orders"), products);
         } finally {
-            AnalyzeCommand.removeTree(snapshots);
+            TransactionalOutput.removeTree(snapshots);
         }
     }
 }

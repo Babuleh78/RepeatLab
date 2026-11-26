@@ -34,7 +34,7 @@ final class CohortAnalytics {
                     CohortAnalytics::activityRow, observedFrom, observedUntil);
             result = new Result(version, Map.copyOf(sqlHashes), repeatRows, activityRows);
         }
-        AnalyzeCommand.removeTree(spill);
+        TransactionalOutput.removeTree(spill);
         return result;
     }
 

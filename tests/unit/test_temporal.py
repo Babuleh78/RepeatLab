@@ -132,6 +132,25 @@ def test_timezone_aware_orders_are_rejected() -> None:
         Order("A", datetime(2010, 12, 1, tzinfo=UTC), "sale")
 
 
+@pytest.mark.parametrize(("horizon", "lookback"), [(0.5, 180), (30, 0.5), (True, 180), (30, True)])
+def test_windows_require_whole_day_counts(horizon: object, lookback: object) -> None:
+    with pytest.raises(TypeError, match="integer"):
+        build_snapshot(
+            (),
+            snapshot_time=SNAPSHOT,
+            observed_until=HORIZON_END,
+            horizon_days=cast(int, horizon),
+            lookback_days=cast(int, lookback),
+        )
+
+
+def test_order_rejects_numeric_customer_and_non_datetime_timestamp() -> None:
+    with pytest.raises(TypeError, match="customer_id"):
+        Order(cast(str, 42), SNAPSHOT, "sale")
+    with pytest.raises(TypeError, match="event_time"):
+        Order("A", cast(datetime, "2011-01-01"), "sale")
+
+
 @pytest.mark.parametrize("aware_field", ["snapshot_time", "observed_until"])
 def test_timezone_aware_boundaries_are_rejected(aware_field: str) -> None:
     snapshot_time = SNAPSHOT.replace(tzinfo=UTC) if aware_field == "snapshot_time" else SNAPSHOT

@@ -70,6 +70,15 @@ class AnalyticsTest {
         assertThrows(java.io.IOException.class, () -> SqlAnalytics.scale(List.of(order("I", amount))));
     }
 
+    @Test void commonScaleMustFitTheLargestIntegerAndSmallestFractionTogether() throws Exception {
+        var integer = order("I", "1E+35");
+        var fraction = order("F", "1E-2");
+        assertEquals(2, SqlAnalytics.scale(List.of(integer, fraction)));
+        assertThrows(java.io.IOException.class,
+                () -> SqlAnalytics.scale(List.of(order("F", "1E-3"), integer)));
+        assertEquals(38, SqlAnalytics.scale(List.of(order("F", "1E-38"))));
+    }
+
     @Test void fitting38DigitsRemainExactAndGroupedOverflowFails() throws Exception {
         String maximum = "99999999999999999999999999999999999999";
         Path fitting = Files.createDirectory(temp.resolve("fit"));
@@ -94,9 +103,12 @@ class AnalyticsTest {
         Json.write(clean.resolve("dispositions.jsonl"), Json.object());
         Json.write(clean.resolve("audit.json"), Json.object());
         Map<String, Object> cleanHashes = Json.object();
+        var config = Json.object("policy_version", CleaningPolicy.VERSION, "service_codes", List.of("SERVICE"));
+        String configHash = CleaningPolicy.fromManifest(StrictJson.parse(Json.encode(config))).hash();
         for (String name : List.of("clean_events.jsonl", "dispositions.jsonl", "audit.json")) cleanHashes.put(name, Json.hash(clean.resolve(name)));
         Json.write(clean.resolve("manifest.json"), Json.object("schema", "repeatlab-clean", "schema_version", 1, "status", "completed",
-                "data_status", "ok", "counts", sourceCounts, "artifacts", cleanHashes, "config_sha256", "0".repeat(64)));
+                "policy_version", CleaningPolicy.VERSION, "config", config, "data_status", "ok", "counts", sourceCounts,
+                "artifacts", cleanHashes, "config_sha256", configHash));
         Map<String, Object> counts = Json.object("orders", 1, "sale_orders", 1, "cancellation_orders", 0,
                 "missing_customer_orders", 0, "included_product_rows", 1, "excluded_service_rows", 0, "duplicate_groups", 0);
         Json.write(orders.resolve("orders.jsonl"), Json.object("schema", "repeatlab-orders", "schema_version", 1,
@@ -112,7 +124,7 @@ class AnalyticsTest {
         Json.write(orders.resolve("manifest.json"), Json.object("schema", "repeatlab-orders", "schema_version", 1,
                 "policy_version", "orders-v1", "worker_protocol_version", 1, "status", "completed", "data_status", "ok",
                 "input", Json.object("clean_manifest_sha256", Json.hash(clean.resolve("manifest.json")), "clean_artifacts", cleanHashes,
-                        "config_sha256", "0".repeat(64)), "counts", counts, "source_clean_counts", sourceCounts, "artifacts", hashes));
+                        "config_sha256", configHash), "counts", counts, "source_clean_counts", sourceCounts, "artifacts", hashes));
         return new Path[]{orders, clean, folder.resolve("verified")};
     }
 
@@ -122,6 +134,26 @@ class AnalyticsTest {
         assertEquals(new BigInteger("100000000000000000000"), data.orders.getFirst().quantity());
         assertEquals("1E+2147483648", data.orders.getFirst().amount());
         assertThrows(java.io.IOException.class, () -> SqlAnalytics.scale(data.orders));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cleanBoundOrdersVerifyConfigChecksumAndProductClassification(boolean updateConfigHash) throws Exception {
+        Path[] paths = exchange("1", "1E+20");
+        Path cleanPath = paths[1].resolve("manifest.json"), orderPath = paths[0].resolve("manifest.json");
+        ObjectNode clean = (ObjectNode) StrictJson.read(cleanPath), orders = (ObjectNode) StrictJson.read(orderPath);
+        ObjectNode input = (ObjectNode) orders.get("input");
+        ((ObjectNode) clean.get("config")).putArray("service_codes").add("P");
+        if (updateConfigHash) {
+            String hash = CleaningPolicy.fromManifest(clean.get("config")).hash();
+            clean.put("config_sha256", hash);
+            input.put("config_sha256", hash);
+        }
+        Files.writeString(cleanPath, clean.toString());
+        input.put("clean_manifest_sha256", Json.hash(cleanPath));
+        Files.writeString(orderPath, orders.toString());
+        var failure = assertThrows(java.io.IOException.class, () -> new OrdersDataset(paths[0], paths[1], paths[2]));
+        assertTrue(failure.getMessage().contains(updateConfigHash ? "Service flag" : "checksum"));
     }
 
     @Test void quantityTokensMayExceedJacksonDefaultLength() throws Exception {

@@ -55,8 +55,8 @@ final class DuplicateSensitivityAnalytics {
 
     private DuplicateSensitivityAnalytics() {}
 
-    static Result run(Path facts, Path stage, Path cleanEvents) throws IOException, SQLException {
-        var memberships = SensitivityOrderMembership.read(cleanEvents);
+    static Result run(Path facts, Path stage, Path cleanEvents, CleaningPolicy policy) throws IOException, SQLException {
+        var memberships = SensitivityOrderMembership.read(cleanEvents, policy);
         Path spill = Files.createDirectory(stage.resolve("duckdb-temp"));
         try (Connection connection = DuckDbReports.connect(spill)) {
             String engine = DuckDbReports.version(connection);
@@ -73,7 +73,7 @@ final class DuplicateSensitivityAnalytics {
             connection.commit();
             return new Result(engine, Map.copyOf(hashes), rows, counts.orders(), counts.retained(), counts.collapsed());
         } finally {
-            AnalyzeCommand.removeTree(spill);
+            TransactionalOutput.removeTree(spill);
         }
     }
 
@@ -88,7 +88,7 @@ final class DuplicateSensitivityAnalytics {
         int scale = 0, integerDigits = 0;
         long orders = 0, retainedLines = 0, collapsedLines = 0;
         String previous = null;
-        try (var reader = Files.newBufferedReader(facts);
+        try (var reader = ArtifactFiles.reader(facts);
              var insert = connection.prepareStatement("INSERT INTO facts VALUES (?, ?, ?, ?, CAST(? AS BIGNUM), ?, "
                      + "?, CAST(? AS BIGNUM), ?)")) {
             for (String line; (line = reader.readLine()) != null;) {

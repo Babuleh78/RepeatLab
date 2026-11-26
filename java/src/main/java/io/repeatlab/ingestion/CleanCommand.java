@@ -26,15 +26,20 @@ final class CleanCommand {
             output = Path.of(parameters.get("--output"));
         } catch (InvalidPathException invalid) { return 64; }
         TransactionalOutput transaction = null;
+        String stageName = "output_reservation";
         Instant started = Instant.now();
         try {
             output = ObservedOrdersArguments.resolveOutput(output);
             input = ObservedOrdersArguments.resolveSource(input, output, "raw");
             config = ObservedOrdersArguments.resolveSource(config, output, "config");
             transaction = new TransactionalOutput(output);
+            stageName = "config";
             CleaningPolicy policy = CleaningPolicy.read(config);
+            stageName = "raw_validation";
             RawDataset raw = new RawDataset(input, transaction.staging());
+            stageName = "cleaning";
             CleanWriter writer = new CleanWriter(raw, policy, transaction.staging());
+            stageName = "publication";
             raw.releaseSnapshot();
             Map<String, String> hashes = new LinkedHashMap<>();
             for (String name : CleanWriter.ARTIFACTS) hashes.put(name, Json.hash(transaction.staging().resolve(name)));
@@ -49,13 +54,14 @@ final class CleanCommand {
             return writer.quarantined() ? 2 : 0;
         } catch (Exception failure) {
             Object fatal = Json.object("schema_version", 1, "status", "failed", "code", "CLEANING_FAILED",
-                    "error_type", failure.getClass().getSimpleName(), "message", failure.getMessage(),
+                    "stage", stageName,
+                    "error_type", failure.getClass().getSimpleName(), "message", DiagnosticFailure.describe(failure),
                     "started_at", started.toString(), "finished_at", Instant.now().toString());
             try {
                 err.println(Json.encode(fatal));
                 if (transaction != null) transaction.failed(fatal);
             } catch (Exception diagnosticFailure) {
-                err.println("CLEANING_FAILED: unable to persist diagnostics: " + diagnosticFailure.getClass().getSimpleName());
+                err.println("CLEANING_FAILED: cleanup or failure diagnostics incomplete: " + diagnosticFailure.getClass().getSimpleName());
             }
             return 1;
         }

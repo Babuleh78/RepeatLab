@@ -221,6 +221,22 @@ class CleaningTest {
         assertFalse(Files.exists(target.resolve("manifest.json")));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"[\"B\",\"A\"]", "[\"A\",\"A\"]", "[\"😀\",\"\ue000\"]"})
+    void completedManifestRejectsNoncanonicalServiceCodes(String codes) throws Exception {
+        var config = StrictJson.parse("{\"policy_version\":\"clean-v1\",\"service_codes\":" + codes + "}");
+        assertThrows(java.io.IOException.class, () -> CleaningPolicy.fromManifest(config));
+    }
+
+    @Test void canonicalServiceIndexMatchesLiteralUnicodeCodes() throws Exception {
+        var config = StrictJson.parse("{\"policy_version\":\"clean-v1\",\"service_codes\":[\"01\",\"\ue000\",\"😀\"]}");
+        var policy = CleaningPolicy.fromManifest(config);
+        assertTrue(policy.service("01"));
+        assertTrue(policy.service("😀"));
+        assertFalse(policy.service("1"));
+        assertFalse(policy.service("😀 "));
+    }
+
     @Test void configurationOrderDoesNotChangeArtifactsAndOutputNeverOverwrites() throws Exception {
         Path source = write(temp.resolve("source.xlsx"), false, header() + data(2));
         Path raw = temp.resolve("raw");

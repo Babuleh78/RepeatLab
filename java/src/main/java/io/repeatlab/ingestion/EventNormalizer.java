@@ -34,7 +34,7 @@ final class EventNormalizer {
         if (value.scale() > 0 && value.stripTrailingZeros().scale() > 0)
             throw new ArithmeticException("Fractional value");
         if ((long) value.precision() - value.scale() > maxDigits)
-            throw new IOException("Expanded integer exceeds " + DIGIT_LIMIT + "=" + maxDigits);
+            throw new DiagnosticFailure("Expanded integer exceeds " + DIGIT_LIMIT + "=" + maxDigits);
         return value.toBigIntegerExact();
     }
 
