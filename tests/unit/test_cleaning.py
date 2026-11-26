@@ -113,6 +113,30 @@ def test_safe_default_excludes_services_and_metadata_is_immutable(tmp_path: Path
         dataset.counts["data_rows"] = 99
 
 
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n", b"\r", b""])
+def test_reader_streams_rows_and_hashes_original_line_endings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: bytes
+) -> None:
+    event, disposition, manifest = fixture(tmp_path)
+    publish(tmp_path, event, disposition, manifest)
+    for name, row in (("clean_events.jsonl", event), ("dispositions.jsonl", disposition)):
+        contents = canonical(row) + ending
+        (tmp_path / name).write_bytes(contents)
+        manifest["artifacts"][name] = hashlib.sha256(contents).hexdigest()
+    (tmp_path / "manifest.json").write_bytes(canonical(manifest))
+    read_bytes = Path.read_bytes
+
+    def read_small_file(path: Path) -> bytes:
+        assert path.suffix != ".jsonl", "whole-file JSONL allocation"
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_small_file)
+    assert reader()(tmp_path).events[0].event_id == event["event_id"]
+    (tmp_path / "dispositions.jsonl").write_bytes(b" " + canonical(disposition) + ending)
+    with pytest.raises(ValueError, match="checksum"):
+        reader()(tmp_path)
+
+
 @pytest.mark.parametrize("sheet,row", [(1, 1), (2147483648, 2)])
 def test_impossible_raw_data_coordinates_are_rejected(tmp_path: Path, sheet: int, row: int) -> None:
     event, disposition, manifest = fixture(tmp_path)

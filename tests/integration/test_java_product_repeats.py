@@ -193,6 +193,47 @@ def test_rejects_rehashed_lineage_swapping_two_invoices(
     assert not (output / "manifest.json").exists()
 
 
+@pytest.mark.parametrize("change", ["replace-member", "truncate-group", "omit-group"])
+def test_reconciles_rehashed_duplicate_groups_with_clean_contents(
+    tmp_path: Path, source_pair: tuple[Path, Path], change: str
+) -> None:
+    clean, original_orders = source_pair
+    orders = tmp_path / "orders"
+    shutil.copytree(original_orders, orders)
+    duplicates = orders / "duplicates.jsonl"
+    [group] = records(duplicates)
+    ids = group["event_ids"]
+    assert len(ids) == 3
+    manifest = document(orders / "manifest.json")
+    if change == "omit-group":
+        duplicates.write_bytes(b"")
+        audit_path = orders / "audit.json"
+        audit = document(audit_path)
+        audit["counts"]["duplicate_groups"] = manifest["counts"]["duplicate_groups"] = 0
+        audit_path.write_text(json.dumps(audit), encoding="utf-8")
+        manifest["artifacts"][audit_path.name] = sha256(audit_path)
+    else:
+        members = ids[:-1]
+        if change == "replace-member":
+            # Q belongs to the same invoice and has the same lineage disposition as the P rows.
+            members.append(
+                next(
+                    e["event_id"]
+                    for e in records(clean / "clean_events.jsonl")
+                    if e["invoice_id"] == "A2" and e["stock_code"] == "Q"
+                )
+            )
+        group["event_ids"] = sorted(members)
+        duplicates.write_text(json.dumps(group) + "\n", encoding="utf-8")
+    manifest["artifacts"][duplicates.name] = sha256(duplicates)
+    (orders / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "out"
+    result = run_repeats(clean, orders, output)
+    assert result.returncode == 1, result.stderr
+    assert "duplicate" in json.dumps(document(output / "fatal.json")).lower()
+    assert not (output / "manifest.json").exists()
+
+
 def test_coverage_checks_anonymous_order_and_argument_bounds(
     tmp_path: Path, source_pair: tuple[Path, Path]
 ) -> None:

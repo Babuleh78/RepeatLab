@@ -21,7 +21,7 @@ class DuplicateSensitivityAnalyticsTest {
     @TempDir Path temp;
 
     @Test void comparesEachObservedSegmentAndPreservesUnboundedSignedUnits() throws Exception {
-        String large = "1" + "0".repeat(100);
+        String large = "1" + "0".repeat(1100);
         String twice = new BigInteger(large).multiply(BigInteger.TWO).toString();
         String date = "0001-01-31T23:59:59.999999";
         Path facts = writeFacts(List.of(
@@ -30,7 +30,11 @@ class DuplicateSensitivityAnalyticsTest {
                 order("C1", date, false, values(2, "-" + twice, "-0.670"), values(1, "-" + large, "-0.335")),
                 order("D", date, false, values(1, "2", "4"), values(1, "2", "4")),
                 order("E", "9999-12-01T00:00:00", true, values(1, "1", "1"), values(1, "1", "1"))));
-        var result = DuplicateSensitivityAnalytics.run(facts, temp);
+        Path clean = writeClean(List.of(event("A", date, "buyer", large, "1E-1100"), event("B", date, "buyer", large, "335E-1103"),
+                event("C1", date, null, "-" + large, "335E-1103"), event("D", date, null, "2", "2"),
+                event("A", date, "buyer", large, "1E-1100"), event("C1", date, null, "-" + large, "335E-1103"),
+                event("E", "9999-12-01T00:00:00.000000", "buyer", "1", "1")));
+        var result = DuplicateSensitivityAnalytics.run(facts, temp, clean);
         assertEquals(5, result.orders());
         assertEquals(7, result.productLines());
         assertEquals(5, result.collapsedLines());
@@ -50,7 +54,9 @@ class DuplicateSensitivityAnalyticsTest {
     }
 
     @Test void emptyFactsWriteEmptyReport() throws Exception {
-        var result = DuplicateSensitivityAnalytics.run(writeFacts(List.of()), temp);
+        var service = event("S", "2010-01-01T00:00:00", "buyer", "1", "10");
+        service.put("is_service", true);
+        var result = DuplicateSensitivityAnalytics.run(writeFacts(List.of()), temp, writeClean(List.of(service)));
         assertEquals(0, result.orders());
         assertEquals(0, result.rows());
         assertEquals(0, Files.size(temp.resolve("duplicate_sensitivity.jsonl")));
@@ -58,7 +64,10 @@ class DuplicateSensitivityAnalyticsTest {
 
     @Test void rejectsInconsistentScenarioFactsBeforeAggregation() throws Exception {
         String date = "2010-01-31T00:00:00";
-        var valid = order("A", date, true, values(2, "12", "8"), values(1, "6", "4"));
+        Path clean = writeClean(List.of(event("A", date, "buyer", "6", "1"), event("A", date, "buyer", "6", "1")));
+        var valid = order("A", date, true, values(2, "12", "12"), values(1, "6", "6"));
+        Path good = Files.createTempDirectory(temp, "valid");
+        assertEquals(1, DuplicateSensitivityAnalytics.run(writeFacts(good, List.of(valid)), good, clean).orders());
         var bad = new ArrayList<Map<String, Object>>();
         bad.add(order("A", "2010-02-30T00:00:00", true, values(1, "1", "8"), values(1, "1", "8")));
         bad.add(order("A", date + ".0000001", true, values(1, "1", "8"), values(1, "1", "8")));
@@ -70,10 +79,10 @@ class DuplicateSensitivityAnalyticsTest {
         bad.add(order("A", date, true, values(2, "1", "8"), values(1, "1", "4")));
         for (var row : bad) {
             Path stage = Files.createTempDirectory(temp, "invalid");
-            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(row)), stage));
+            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(row)), stage, clean));
         }
         Path stage = Files.createTempDirectory(temp, "twice");
-        assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(valid, valid)), stage));
+        assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, List.of(valid, valid)), stage, clean));
     }
 
     @Test void refusesGlobalScaleThatWouldRoundOrOverflowAndGroupTotalsBeyond38Digits() throws Exception {
@@ -82,12 +91,53 @@ class DuplicateSensitivityAnalyticsTest {
         for (String amount : List.of("1E-39", "1E+38", "0.1")) {
             Path stage = Files.createTempDirectory(temp, "shape");
             var v = values(1, "1", amount);
+            Path clean = writeClean(List.of(event("A", date, "buyer", "1", "9".repeat(38)), event("B", date, null, "1", amount)));
             Path facts = writeFacts(stage, List.of(order("A", date, true, max, max), order("B", date, false, v, v)));
-            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(facts, stage));
+            assertThrows(IOException.class, () -> DuplicateSensitivityAnalytics.run(facts, stage, clean));
         }
         var one = values(1, "1", "1");
         Path facts = writeFacts(List.of(order("A", date, true, max, max), order("B", date, true, one, one)));
-        assertThrows(SQLException.class, () -> DuplicateSensitivityAnalytics.run(facts, temp));
+        Path sameSegment = writeClean(List.of(event("A", date, "buyer", "1", "9".repeat(38)), event("B", date, "other", "1", "1")));
+        assertThrows(SQLException.class, () -> DuplicateSensitivityAnalytics.run(facts, temp, sameSegment));
+    }
+
+    @Test void bindsWorkerOrdersAndSegmentMembershipToEveryCleanProductInvoice() throws Exception {
+        String date = "2010-01-01T00:00:00";
+        Path clean = writeClean(List.of(event("A", date, null, "1", "2"), event("B", date, "buyer", "3", "1.5"),
+                event("B", date, "buyer", "1", "1.5")));
+        var one = values(1, "1", "2");
+        var two = values(2, "4", "6");
+        var a = order("A", date, false, one, one);
+        var b = order("B", date, true, two, two);
+        // Equal grand totals can still assign product lines, units or sales to the wrong order or segment.
+        var others = List.of(
+                List.of(order("A", date, false, two, two), order("B", date, true, one, one)),
+                List.of(order("A", date, true, one, one), b),
+                List.of(a, order("B", date + ".000001", true, two, two)),
+                List.of(a, order("X", date, true, two, two)),
+                List.of(a, order("B", date, true, values(2, "5", "6"), values(2, "5", "6"))),
+                List.of(a, order("B", date, true, values(2, "4", "5"), values(2, "4", "5"))),
+                List.of(a, order("B", date, true, two, values(1, "3", "4.5"))),
+                List.of(a));
+        for (var facts : others) {
+            Path stage = Files.createTempDirectory(temp, "replay");
+            var failure = assertThrows(IOException.class,
+                    () -> DuplicateSensitivityAnalytics.run(writeFacts(stage, facts), stage, clean));
+            assertTrue(failure.getMessage().contains("clean product"));
+        }
+    }
+
+    private static Map<String, Object> event(String key, String date, String customer, String units, String price) {
+        return Json.object("invoice_id", key, "event_time", date, "kind", key.startsWith("C") ? "cancellation" : "sale",
+                "is_service", false, "customer_id", customer, "quantity", new BigInteger(units), "stock_code", "P", "unit_price", price);
+    }
+
+    private Path writeClean(List<Map<String, Object>> events) throws IOException {
+        Path file = Files.createTempFile(temp, "events", ".jsonl");
+        try (var writer = Files.newBufferedWriter(file)) {
+            for (var event : events) Json.line(writer, event);
+        }
+        return file;
     }
 
     private Path writeFacts(List<Map<String, Object>> rows) throws IOException { return writeFacts(temp, rows); }

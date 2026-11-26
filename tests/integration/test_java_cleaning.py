@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 import subprocess
 from datetime import datetime
 from decimal import Decimal
@@ -133,3 +134,42 @@ def test_equivalent_iso_spellings_survive_verified_exchange(tmp_path: Path, time
     orders = dataset.aggregate().orders
     assert len(orders) == 1
     assert (orders[0].line_count, orders[0].total_amount) == (2, Decimal("0.2000"))
+
+
+def test_clean_integer_budget_stops_publication_and_can_be_raised(tmp_path: Path) -> None:
+    clean = run_clean(tmp_path, [("I", "P", "1E+4", "2020-01-01", "0.1", "A")])
+    raw = tmp_path / "raw"
+    original = (raw / "manifest.json").read_bytes()
+    for digits, code in ((4, 1), (5, 0)):
+        output = tmp_path / f"limit-{digits}"
+        env = dict(os.environ)
+        env["JAVA_TOOL_OPTIONS"] = (
+            env.get("JAVA_TOOL_OPTIONS", "") + f" -Drepeatlab.clean.maxIntegerDigits={digits}"
+        )
+        result = subprocess.run(
+            [
+                java_command(),
+                "-jar",
+                str(JAR),
+                "clean",
+                "--input",
+                str(raw),
+                "--config",
+                str(tmp_path / "config.json"),
+                "--output",
+                str(output),
+            ],
+            env=env,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == code
+        if code:
+            assert b"maxIntegerDigits=4" in (output / "fatal.json").read_bytes()
+            assert not (output / "manifest.json").exists()
+        else:
+            assert (clean / "clean_events.jsonl").read_bytes() == (
+                output / "clean_events.jsonl"
+            ).read_bytes()
+    assert (raw / "manifest.json").read_bytes() == original

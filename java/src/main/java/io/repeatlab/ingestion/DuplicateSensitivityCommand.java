@@ -63,9 +63,10 @@ final class DuplicateSensitivityCommand {
                 snapshot.verifyHashes(clean);
                 StrictJson.require(Files.isRegularFile(facts, LinkOption.NOFOLLOW_LINKS),
                         "Worker did not produce an order facts file");
+                verifyWorkerReceipt(output.resolve("worker.stdout.log"), snapshot.manifestHash(), facts);
 
                 stageName = "sql";
-                sql = DuplicateSensitivityAnalytics.run(facts, stage);
+                sql = DuplicateSensitivityAnalytics.run(facts, stage, clean.resolve("clean_events.jsonl"));
                 StrictJson.require(sql.productLines() == OrdersDataset.count(snapshot.counts(), "accepted_product_rows"),
                         "Retained product rows differ from the clean audit");
             } finally {
@@ -104,6 +105,17 @@ final class DuplicateSensitivityCommand {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             return 1;
         }
+    }
+
+    private static void verifyWorkerReceipt(Path receipt, String cleanHash, Path facts) throws IOException {
+        StrictJson.require(Files.size(receipt) <= 512, "Invalid worker receipt size");
+        JsonNode result = StrictJson.read(receipt);
+        StrictJson.keys(result, "protocol_version", "clean_manifest_sha256", "facts_sha256");
+        StrictJson.integer(result.get("protocol_version"), 1, 1);
+        StrictJson.require(StrictJson.hash(result.get("clean_manifest_sha256")).equals(cleanHash),
+                "Worker receipt points to a different clean input");
+        StrictJson.require(StrictJson.hash(result.get("facts_sha256")).equals(Json.hash(facts)),
+                "Order facts differ from the worker receipt");
     }
 
     private record CleanSnapshot(String manifestHash, String configHash, JsonNode artifacts,

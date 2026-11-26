@@ -9,6 +9,7 @@ from pathlib import Path
 
 from repeatlab.aggregation import AggregatedOrder, aggregate_orders
 from repeatlab.cleaning import read_clean_dataset
+from repeatlab.orders import _file_sha256
 
 
 def _identity(order: AggregatedOrder) -> tuple[str, str | None, datetime, str, int]:
@@ -81,7 +82,17 @@ def main(arguments: list[str] | None = None) -> int:
     except SystemExit as error:
         return 0 if error.code == 0 else 64
     try:
+        manifest = options.input / "manifest.json"
+        manifest_hash = _file_sha256(manifest)
         status = write_facts(options.input, options.output)
+        if _file_sha256(manifest) != manifest_hash:
+            raise ValueError("clean manifest changed while writing facts")
+        receipt = {
+            "protocol_version": 1,
+            "clean_manifest_sha256": manifest_hash,
+            "facts_sha256": _file_sha256(options.output),
+        }
+        print(json.dumps(receipt, separators=(",", ":")), flush=True)
     except (Exception, KeyboardInterrupt) as error:
         print(f"duplicate sensitivity failed: {type(error).__name__}: {error}", file=sys.stderr)
         return 1

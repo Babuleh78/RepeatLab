@@ -154,3 +154,17 @@ def test_unknown_event_kind_is_rejected() -> None:
 
 def test_no_orders_produces_no_customers() -> None:
     assert build_snapshot((), snapshot_time=SNAPSHOT, observed_until=HORIZON_END) == ()
+
+
+def test_lookback_before_first_year_includes_first_representable_order() -> None:
+    rows = build_snapshot(
+        [Order("A", datetime.min, "sale")],
+        snapshot_time=datetime(1, 1, 15),
+        observed_until=datetime(1, 3, 1),
+    )
+    assert [(row.customer_id, row.history_order_count, row.label) for row in rows] == [("A", 1, 0)]
+
+
+def test_unrepresentable_label_end_reports_invalid_horizon() -> None:
+    with pytest.raises(ValueError, match="label_end"):
+        build_snapshot((), snapshot_time=datetime(9999, 12, 15), observed_until=datetime.max)

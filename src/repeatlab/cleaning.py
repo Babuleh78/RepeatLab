@@ -3,7 +3,8 @@
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Generator, Iterator, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -106,13 +107,23 @@ def _nonfinite(value: str) -> Any:
     raise ValueError(f"nonfinite JSON number: {value}")
 
 
-def _parse(payload: bytes) -> Any:
+def _parse(payload: str) -> Any:
     return json.loads(
-        payload.decode("utf-8"),
+        payload,
         object_pairs_hook=_pairs,
         parse_constant=_nonfinite,
         parse_int=lambda value: int(Decimal(value)),
     )
+
+
+def _verified_rows(path: Path, expected_hash: str) -> Generator[Any, None, None]:
+    digest = sha256()
+    # UTF-8 has a unique encoding and newline="" preserves CR, LF and CRLF verbatim.
+    with path.open(encoding="utf-8", newline="") as stream:
+        for line in stream:
+            digest.update(line.encode("utf-8"))
+            yield _parse(line)
+    _require(digest.hexdigest() == expected_hash, f"checksum mismatch: {path.name}")
 
 
 def _object(value: Any, keys: set[str]) -> dict[str, Any]:
@@ -245,7 +256,7 @@ def _event(
 def read_clean_dataset(path: str | Path) -> CleanDataset:
     """Read only a completed directory whose entire verified exchange is consistent.
 
-    Artifact bytes are hashed and parsed from the same in-memory snapshot. No
+    Each JSONL stream is hashed and parsed in one pass. No
     usable events are returned on checksum, schema, coverage or policy errors.
     """
     try:
@@ -264,7 +275,7 @@ def read_clean_dataset(path: str | Path) -> CleanDataset:
 
 def _read(path: Path) -> CleanDataset:
     manifest = _object(
-        _parse((path / "manifest.json").read_bytes()),
+        _parse((path / "manifest.json").read_bytes().decode("utf-8")),
         {
             "schema",
             "schema_version",
@@ -302,14 +313,15 @@ def _read(path: Path) -> CleanDataset:
     for value in _object(source["artifacts"], _INPUT_ARTIFACTS).values():
         _hash(value)
     expected_counts = _counts(manifest["counts"])
-    hashes = _object(manifest["artifacts"], _ARTIFACTS)
-    payloads: dict[str, bytes] = {}
-    for name, digest in hashes.items():
-        payload = (path / name).read_bytes()
-        _require(sha256(payload).hexdigest() == _hash(digest), f"checksum mismatch: {name}")
-        payloads[name] = payload
+    hashes = {
+        name: _hash(value) for name, value in _object(manifest["artifacts"], _ARTIFACTS).items()
+    }
+    audit_bytes = (path / "audit.json").read_bytes()
+    _require(
+        sha256(audit_bytes).hexdigest() == hashes["audit.json"], "checksum mismatch: audit.json"
+    )
     audit = _object(
-        _parse(payloads.pop("audit.json")),
+        _parse(audit_bytes.decode("utf-8")),
         {
             "schema",
             "schema_version",
@@ -327,92 +339,17 @@ def _read(path: Path) -> CleanDataset:
     }
     _require(set(expected_reasons) <= _REASONS, "unknown reason count")
 
-    events: list[CleanEvent] = []
-    by_id: dict[str, tuple[CleanEvent, dict[str, Any], tuple[str, ...]]] = {}
-    invoice_fields: dict[str, tuple[str | None, datetime, OrderKind]] = {}
-    previous = (0, 0)
-    for line in payloads.pop("clean_events.jsonl").splitlines():
-        node = _parse(line)
-        event, flags = _event(node, services, source_hash)
-        sheet, row, _ = _origin(node["provenance"], source_hash, event.event_id)
-        _require((sheet, row) > previous, "duplicate or unordered event origin")
-        previous = sheet, row
-        _require(event.event_id not in by_id, "duplicate event identifier")
-        by_id[event.event_id] = event, node["provenance"], flags
-        fields = (event.customer_id, event.event_time, event.kind)
-        _require(
-            invoice_fields.setdefault(event.invoice_id, fields) == fields,
-            "inconsistent clean invoice",
+    with (
+        closing(
+            _verified_rows(path / "clean_events.jsonl", hashes["clean_events.jsonl"])
+        ) as event_rows,
+        closing(
+            _verified_rows(path / "dispositions.jsonl", hashes["dispositions.jsonl"])
+        ) as dispositions,
+    ):
+        events, actual, reasons = _read_coverage(
+            event_rows, dispositions, services, source_hash, expected_counts
         )
-        events.append(event)
-
-    actual = {key: 0 for key in _COUNTS}
-    actual["header_rows"], actual["empty_rows"] = (
-        expected_counts["header_rows"],
-        expected_counts["empty_rows"],
-    )
-    reasons: Counter[str] = Counter()
-    previous = (0, 0)
-    sheet_names: dict[int, str] = {}
-    quarantined_invoices: set[str] = set()
-    seen_ids: set[str] = set()
-    accepted_ids: list[str] = []
-    for line in payloads.pop("dispositions.jsonl").splitlines():
-        node = _object(
-            _parse(line),
-            {
-                "schema",
-                "schema_version",
-                "event_id",
-                "invoice_id",
-                "provenance",
-                "status",
-                "reasons",
-                "quality_flags",
-            },
-        )
-        _envelope(node)
-        sheet, row, name = _origin(node["provenance"], source_hash, node["event_id"])
-        _require((sheet, row) > previous, "duplicate or unordered disposition origin")
-        previous = sheet, row
-        _require(sheet_names.setdefault(sheet, name) == name, "inconsistent sheet name")
-        event_id = _hash(node["event_id"])
-        _require(event_id not in seen_ids, "duplicate disposition identifier")
-        seen_ids.add(event_id)
-        invoice = None if node["invoice_id"] is None else _identifier(node["invoice_id"])
-        flags = _codes(node["quality_flags"], _FLAGS)
-        row_reasons = _codes(node["reasons"], _REASONS)
-        actual["data_rows"] += 1
-        actual["warning_rows"] += bool(flags)
-        actual["missing_customer_rows"] += "MISSING_CUSTOMER_ID" in flags
-        status = _text(node["status"])
-        if status == "quarantined":
-            _require(bool(row_reasons) and event_id not in by_id, "invalid quarantine disposition")
-            if invoice is not None:
-                quarantined_invoices.add(invoice)
-            actual["quarantined_rows"] += 1
-            reasons.update(row_reasons)
-        else:
-            _require(
-                status in ("accepted_product", "accepted_service"), "invalid disposition status"
-            )
-            _require(not row_reasons and event_id in by_id, "accepted disposition mismatch")
-            event, provenance, event_flags = by_id[event_id]
-            _require(
-                invoice == event.invoice_id
-                and provenance == node["provenance"]
-                and flags == event_flags,
-                "event/disposition mismatch",
-            )
-            expected_status = (
-                "accepted_service" if event.stock_code in services else "accepted_product"
-            )
-            _require(status == expected_status, "disposition service mismatch")
-            actual["accepted_rows"] += 1
-            actual[status + "_rows"] += 1
-            accepted_ids.append(event_id)
-    _require(accepted_ids == [event.event_id for event in events], "incomplete event coverage")
-    _require(not quarantined_invoices.intersection(invoice_fields), "partially quarantined invoice")
     _require(actual == expected_counts, "disposition counts mismatch")
     _require(dict(reasons) == expected_reasons, "reason counts mismatch")
     status = (
@@ -432,3 +369,92 @@ def _read(path: Path) -> CleanDataset:
         config_hash,
         input_hash,
     )
+
+
+def _read_coverage(
+    event_rows: Iterator[Any],
+    dispositions: Iterator[Any],
+    services: frozenset[str],
+    source_hash: str,
+    expected_counts: dict[str, int],
+) -> tuple[list[CleanEvent], dict[str, int], Counter[str]]:
+    events: list[CleanEvent] = []
+    invoice_fields: dict[str, tuple[str | None, datetime, OrderKind]] = {}
+    actual = {key: 0 for key in _COUNTS}
+    actual["header_rows"], actual["empty_rows"] = (
+        expected_counts["header_rows"],
+        expected_counts["empty_rows"],
+    )
+    reasons: Counter[str] = Counter()
+    previous = (0, 0)
+    sheet_names: dict[int, str] = {}
+    quarantined_invoices: set[str] = set()
+    seen_ids: set[str] = set()
+    for disposition in dispositions:
+        node = _object(
+            disposition,
+            {
+                "schema",
+                "schema_version",
+                "event_id",
+                "invoice_id",
+                "provenance",
+                "status",
+                "reasons",
+                "quality_flags",
+            },
+        )
+        _envelope(node)
+        sheet, row, name = _origin(node["provenance"], source_hash, node["event_id"])
+        _require((sheet, row) > previous, "duplicate or unordered disposition origin")
+        previous = sheet, row
+        _require(sheet_names.setdefault(sheet, name) == name, "inconsistent sheet name")
+        event_id = _hash(node["event_id"])
+        _require(event_id not in seen_ids, "duplicate disposition identifier")
+        invoice = None if node["invoice_id"] is None else _identifier(node["invoice_id"])
+        flags = _codes(node["quality_flags"], _FLAGS)
+        row_reasons = _codes(node["reasons"], _REASONS)
+        actual["data_rows"] += 1
+        actual["warning_rows"] += bool(flags)
+        actual["missing_customer_rows"] += "MISSING_CUSTOMER_ID" in flags
+        status = _text(node["status"])
+        if status == "quarantined":
+            _require(bool(row_reasons), "invalid quarantine disposition")
+            if invoice is not None:
+                quarantined_invoices.add(invoice)
+            actual["quarantined_rows"] += 1
+            reasons.update(row_reasons)
+        else:
+            _require(
+                status in ("accepted_product", "accepted_service"), "invalid disposition status"
+            )
+            _require(not row_reasons, "accepted disposition mismatch")
+            event_node = next(event_rows, None)
+            if event_node is None:
+                raise ValueError("missing clean event for accepted disposition")
+            event, event_flags = _event(event_node, services, source_hash)
+            _require(
+                event.event_id == event_id
+                and invoice == event.invoice_id
+                and event_node["provenance"] == node["provenance"]
+                and flags == event_flags,
+                "event/disposition mismatch",
+            )
+            fields = (event.customer_id, event.event_time, event.kind)
+            _require(
+                invoice_fields.setdefault(event.invoice_id, fields) == fields,
+                "inconsistent clean invoice",
+            )
+            expected_status = (
+                "accepted_service" if event.stock_code in services else "accepted_product"
+            )
+            _require(status == expected_status, "disposition service mismatch")
+            actual["accepted_rows"] += 1
+            actual[status + "_rows"] += 1
+            events.append(event)
+            event_id = event.event_id
+        seen_ids.add(event_id)
+    end = object()
+    _require(next(event_rows, end) is end, "incomplete event coverage")
+    _require(not quarantined_invoices.intersection(invoice_fields), "partially quarantined invoice")
+    return events, actual, reasons

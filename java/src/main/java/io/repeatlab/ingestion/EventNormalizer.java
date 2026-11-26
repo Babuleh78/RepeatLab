@@ -1,5 +1,6 @@
 package io.repeatlab.ingestion;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.List;
@@ -20,23 +21,45 @@ final class EventNormalizer {
         }
     }
 
-    private EventNormalizer() {}
+    private static final String DIGIT_LIMIT = "repeatlab.clean.maxIntegerDigits";
+    private final int maxDigits;
 
-    static Event normalize(RawDataset.Row row, String dateSystem) {
+    EventNormalizer() {
+        maxDigits = Integer.parseInt(System.getProperty(DIGIT_LIMIT, "100000"));
+        if (maxDigits < 1) throw new IllegalArgumentException(DIGIT_LIMIT + " must be positive");
+    }
+
+    private BigInteger integer(BigDecimal value) throws IOException {
+        if (value.signum() == 0) return BigInteger.ZERO;
+        if (value.scale() > 0 && value.stripTrailingZeros().scale() > 0)
+            throw new ArithmeticException("Fractional value");
+        if ((long) value.precision() - value.scale() > maxDigits)
+            throw new IOException("Expanded integer exceeds " + DIGIT_LIMIT + "=" + maxDigits);
+        return value.toBigIntegerExact();
+    }
+
+    Event normalize(RawDataset.Row row, String dateSystem) throws IOException {
+        return normalize(row, readTime(row, dateSystem));
+    }
+
+    static ExactEventTime readTime(RawDataset.Row row, String dateSystem) {
+        try { return ExactEventTime.parse(row.field("invoice_date"), dateSystem); }
+        catch (IllegalArgumentException | ArithmeticException | java.time.DateTimeException invalid) { return null; }
+    }
+
+    Event normalize(RawDataset.Row row, ExactEventTime time) throws IOException {
         Set<String> flags = new TreeSet<>(), reasons = new TreeSet<>();
         String invoice = id(row.field("invoice"), "INVOICE_ID", false, flags, reasons);
         String stock = id(row.field("stock_code"), "STOCK_CODE", false, flags, reasons);
         String customer = id(row.field("customer_id"), "CUSTOMER_ID", true, flags, reasons);
         BigInteger quantity = null;
         BigDecimal price = null;
-        ExactEventTime time = null;
         String kind = null;
-        try { quantity = decimal(row.field("quantity")).toBigIntegerExact(); }
+        try { quantity = integer(decimal(row.field("quantity"))); }
         catch (IllegalArgumentException | ArithmeticException invalid) { reasons.add("INVALID_QUANTITY"); }
         try { price = decimal(row.field("unit_price")); }
         catch (IllegalArgumentException | ArithmeticException invalid) { reasons.add("INVALID_UNIT_PRICE"); }
-        try { time = ExactEventTime.parse(row.field("invoice_date"), dateSystem); }
-        catch (IllegalArgumentException | ArithmeticException | java.time.DateTimeException invalid) { reasons.add("INVALID_EVENT_TIME"); }
+        if (time == null) reasons.add("INVALID_EVENT_TIME");
         if (quantity != null) {
             if (quantity.signum() == 0) reasons.add("ZERO_QUANTITY");
             else if (invoice != null) {
@@ -52,7 +75,7 @@ final class EventNormalizer {
         return new Event(invoice, stock, customer, quantity, price, time, kind, flags, reasons);
     }
 
-    private static String id(Cell cell, String name, boolean optional, Set<String> flags, Set<String> reasons) {
+    private String id(Cell cell, String name, boolean optional, Set<String> flags, Set<String> reasons) throws IOException {
         try {
             if (cell.isFormula()) throw new IllegalArgumentException("Untrusted formula");
             if (CleaningPolicy.missing(cell.value())) {
@@ -60,7 +83,7 @@ final class EventNormalizer {
                 throw new IllegalArgumentException("Missing identifier");
             }
             if (cell.source_type().equals("n")) {
-                String result = new BigDecimal(cell.value()).toBigIntegerExact().toString();
+                String result = integer(new BigDecimal(cell.value())).toString();
                 flags.add("NORMALIZED_" + name);
                 return result;
             }

@@ -20,6 +20,7 @@ import java.util.Properties;
 final class SqlAnalytics {
     record Result(int scale, String engine, Map<String, String> sqlHashes, long monthlyRows, long missingRows) {}
     record DecimalShape(BigInteger scale, int precision) {}
+    private static final int INSERT_BATCH_SIZE = 1024;
     private SqlAnalytics() {}
 
     static DecimalShape shape(String text) throws IOException {
@@ -65,7 +66,9 @@ final class SqlAnalytics {
             try (var statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE orders (invoice_id VARCHAR, customer_id VARCHAR, event_time TIMESTAMP, kind VARCHAR, product_line_count BIGINT, total_amount DECIMAL(38," + scale + "))");
             }
+            connection.setAutoCommit(false);
             try (var insert = connection.prepareStatement("INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)")) {
+                int pending = 0;
                 for (var order : orders) {
                     insert.setString(1, order.invoice());
                     if (order.customer() == null) insert.setNull(2, Types.VARCHAR); else insert.setString(2, order.customer());
@@ -73,9 +76,16 @@ final class SqlAnalytics {
                     insert.setString(3, order.time().toString()); insert.setString(4, order.kind());
                     insert.setLong(5, order.lines());
                     insert.setBigDecimal(6, new BigDecimal(order.amount()).setScale(scale));
-                    insert.executeUpdate();
+                    insert.addBatch();
+                    if (++pending == INSERT_BATCH_SIZE) {
+                        insert.executeBatch();
+                        pending = 0;
+                    }
                 }
+                if (pending > 0) insert.executeBatch();
             }
+            connection.commit();
+            connection.setAutoCommit(true);
             monthly = query(connection, "monthly_activity", stage, scale, hashes);
             missing = query(connection, "missing_customer", stage, scale, hashes);
         }

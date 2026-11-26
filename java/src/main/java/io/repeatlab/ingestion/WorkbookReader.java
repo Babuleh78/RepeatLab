@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.Writer;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +18,7 @@ import org.apache.poi.openxml4j.opc.PackageAccess;
 import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
 import org.apache.poi.xssf.model.SharedStrings;
+import org.apache.poi.xssf.usermodel.XSSFRichTextString;
 
 final class WorkbookReader {
     private static final String NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -57,26 +59,37 @@ final class WorkbookReader {
     private List<Sheet> workbook(InputStream input) throws Exception {
         XMLStreamReader xml = xml(input);
         List<Sheet> result = new ArrayList<>();
+        var names = new HashSet<String>();
+        var relationships = new HashSet<String>();
+        boolean inSheets = false, seenSheets = false;
         try {
+            root(xml, "workbook");
             while (xml.hasNext()) {
                 int event = xml.next();
                 rejectDtd(event);
+                if (event == XMLStreamConstants.END_ELEMENT && element(xml, "sheets")) inSheets = false;
                 if (event != XMLStreamConstants.START_ELEMENT) continue;
-                if (xml.getLocalName().equals("workbook") && !NS.equals(xml.getNamespaceURI()))
-                    throw new IOException("Only transitional OOXML XLSX is supported");
-                if (xml.getLocalName().equals("workbookPr")) {
+                if (!inSheets && element(xml, "workbookPr")) {
                     String flag = attr(xml, "date1904", "false");
                     if (!List.of("false", "true", "0", "1").contains(flag)) throw new IOException("Invalid date1904 flag");
                     date1904 = flag.equals("true") || flag.equals("1");
-                }
-                if (xml.getLocalName().equals("sheet")) {
+                    skip(xml);
+                } else if (!inSheets && element(xml, "sheets")) {
+                    if (seenSheets) throw new IOException("Duplicate workbook sheets");
+                    inSheets = seenSheets = true;
+                } else if (inSheets && element(xml, "sheet")) {
                     String name = attr(xml, "name", null);
+                    String state = attr(xml, "state", "visible");
                     String rel = xml.getAttributeValue(REL_NS, "id");
-                    if (name == null || rel == null) throw new IOException("Sheet metadata is incomplete");
-                    if (result.stream().anyMatch(s -> s.name().equals(name) || s.relationship().equals(rel)))
+                    if (name == null || name.isEmpty() || rel == null || rel.isEmpty())
+                        throw new IOException("Sheet metadata is incomplete");
+                    if (!List.of("visible", "hidden", "veryHidden").contains(state))
+                        throw new IOException("Invalid sheet visibility");
+                    if (!names.add(name) || !relationships.add(rel))
                         throw new IOException("Duplicate sheet metadata");
-                    result.add(new Sheet(name, attr(xml, "state", "visible"), rel));
-                }
+                    result.add(new Sheet(name, state, rel));
+                    skip(xml);
+                } else skip(xml);
             }
         } finally { xml.close(); }
         return result;
@@ -88,33 +101,35 @@ final class WorkbookReader {
         List<Cell> cells = null;
         int row = 0, previousRow = 0, width = 0;
         long physical = 0, data = 0, empty = 0, absent = 0;
-        boolean worksheet = false, inData = false;
+        boolean seenData = false, inData = false;
         try {
+            root(xml, "worksheet");
             while (xml.hasNext()) {
                 int event = xml.next();
                 rejectDtd(event);
                 if (event == XMLStreamConstants.START_ELEMENT) {
-                    String name = xml.getLocalName();
-                    if (name.equals("worksheet")) worksheet = NS.equals(xml.getNamespaceURI());
-                    if (name.equals("sheetData")) inData = true;
-                    if (name.equals("row") && inData) {
-                        if (cells != null) throw new IOException("Nested sheet row");
+                    if (!inData && element(xml, "sheetData")) {
+                        if (seenData) throw new IOException("Duplicate worksheet sheetData");
+                        seenData = inData = true;
+                    } else if (!inData) {
+                        skip(xml);
+                    } else if (cells == null && element(xml, "row")) {
                         row = Integer.parseInt(attr(xml, "r", Integer.toString(previousRow + 1)));
                         if (row <= previousRow || row > 1048576) throw new IOException("Invalid row order or coordinate");
                         absent += row - previousRow - 1;
                         previousRow = row;
                         cells = new ArrayList<>();
-                    } else if (name.equals("c") && inData) {
-                        if (cells == null) throw new IOException("Cell outside a row");
+                    } else if (cells != null && element(xml, "c")) {
                         String reference = attr(xml, "r", Cell.columnName(cells.size()) + row);
                         int column = columnIndex(reference, row);
                         if (column < cells.size()) throw new IOException("Duplicate or out-of-order cell " + reference);
                         while (cells.size() < column) cells.add(Cell.missing(cells.size(), row));
                         cells.add(readCell(xml, strings, reference, column));
-                    }
+                    } else if (cells != null && element(xml, "extLst")) skip(xml);
+                    else throw new IOException("Unexpected worksheet grid element: " + xml.getName());
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
-                    if (xml.getLocalName().equals("sheetData")) inData = false;
-                    if (xml.getLocalName().equals("row") && inData) {
+                    if (element(xml, "sheetData")) inData = false;
+                    if (element(xml, "row") && inData) {
                         if (cells == null) throw new IOException("Unexpected row end");
                         physical++;
                         boolean isEmpty = cells.stream().allMatch(Cell::empty);
@@ -134,7 +149,7 @@ final class WorkbookReader {
                     }
                 }
             }
-            if (!worksheet) throw new IOException("Unsupported sheet type: " + sheet.name());
+            if (!seenData) throw new IOException("Missing worksheet sheetData");
         } catch (Exception failure) {
             throw new WorkbookFailure(index, sheet.name(), row, failure);
         } finally { xml.close(); }
@@ -153,31 +168,32 @@ final class WorkbookReader {
         StringBuilder text = new StringBuilder();
         boolean hasInline = false;
         Map<String, String> formula = null;
-        int phoneticDepth = 0;
         while (xml.hasNext()) {
             int event = xml.next();
             rejectDtd(event);
             if (event == XMLStreamConstants.START_ELEMENT) {
-                switch (xml.getLocalName()) {
-                    case "rPh" -> phoneticDepth++;
-                    case "is" -> hasInline = true;
-                    case "t" -> { if (phoneticDepth == 0) text.append(xml.getElementText()); }
-                    case "v" -> rawValue = xml.getElementText();
-                    case "f" -> {
-                        formula = new LinkedHashMap<>();
-                        for (int i = 0; i < xml.getAttributeCount(); i++)
-                            formula.put(xml.getAttributeLocalName(i), xml.getAttributeValue(i));
-                        formula.put("text", xml.getElementText());
-                    }
-                    default -> { }
-                }
+                if (element(xml, "is")) {
+                    hasInline = true;
+                    inlineText(xml, text);
+                } else if (element(xml, "v")) rawValue = xml.getElementText();
+                else if (element(xml, "f")) {
+                    formula = new LinkedHashMap<>();
+                    for (int i = 0; i < xml.getAttributeCount(); i++)
+                        formula.put(xml.getAttributeLocalName(i), xml.getAttributeValue(i));
+                    formula.put("text", xml.getElementText());
+                } else skip(xml);
             } else if (event == XMLStreamConstants.END_ELEMENT) {
-                if (xml.getLocalName().equals("rPh")) phoneticDepth--;
-                if (xml.getLocalName().equals("c")) break;
+                if (element(xml, "c")) break;
             }
         }
         String value = rawValue;
-        if (type.equals("inlineStr")) value = hasInline ? text.toString() : null;
+        if (type.equals("inlineStr")) {
+            if (rawValue != null) throw new IOException("Unexpected v for inline string at " + reference);
+            String inline = text.toString();
+            value = hasInline ? XSSFRichTextString.utfDecode(inline) : null;
+            if (hasInline && !inline.equals(value)) rawValue = inline;
+        }
+        if (type.equals("str") && rawValue != null) value = XSSFRichTextString.utfDecode(rawValue);
         if (type.equals("s") && rawValue != null) {
             if (strings == null) throw new IOException("Missing shared strings table");
             value = strings.getItemAt(Integer.parseInt(rawValue)).getString();
@@ -185,6 +201,48 @@ final class WorkbookReader {
         String state = formula != null ? "formula" : value == null ? "blank" : value.isEmpty() ? "empty_string" : "value";
         return new Cell(Cell.columnName(column), reference, type, state, formula == null ? value : null,
                 rawValue, style, formula, formula == null ? null : value);
+    }
+
+    private static void inlineText(XMLStreamReader xml, StringBuilder text) throws Exception {
+        boolean run = false;
+        while (xml.hasNext()) {
+            int event = xml.next();
+            rejectDtd(event);
+            if (event == XMLStreamConstants.START_ELEMENT) {
+                if (element(xml, "t")) text.append(xml.getElementText());
+                else if (!run && element(xml, "r")) run = true;
+                else skip(xml);
+            } else if (event == XMLStreamConstants.END_ELEMENT) {
+                if (element(xml, "is")) return;
+                if (element(xml, "r")) run = false;
+            }
+        }
+    }
+
+    private static boolean element(XMLStreamReader xml, String name) {
+        return name.equals(xml.getLocalName()) && NS.equals(xml.getNamespaceURI());
+    }
+
+    private static void root(XMLStreamReader xml, String name) throws Exception {
+        while (xml.hasNext()) {
+            int event = xml.next();
+            rejectDtd(event);
+            if (event == XMLStreamConstants.START_ELEMENT) {
+                if (element(xml, name)) return;
+                break;
+            }
+        }
+        throw new IOException("Expected transitional OOXML " + name);
+    }
+
+    private static void skip(XMLStreamReader xml) throws Exception {
+        int depth = 1;
+        while (depth != 0) {
+            int event = xml.next();
+            rejectDtd(event);
+            if (event == XMLStreamConstants.START_ELEMENT) depth++;
+            if (event == XMLStreamConstants.END_ELEMENT) depth--;
+        }
     }
 
     private static int columnIndex(String reference, int row) throws IOException {
@@ -212,7 +270,7 @@ final class WorkbookReader {
     }
 
     private static String attr(XMLStreamReader xml, String name, String fallback) {
-        String value = xml.getAttributeValue(null, name);
+        String value = xml.getAttributeValue("", name);
         return value == null ? fallback : value;
     }
 }

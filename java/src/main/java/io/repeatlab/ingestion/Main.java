@@ -11,10 +11,12 @@ import java.util.Map;
 
 public final class Main {
     static final String VERSION = "0.1.0";
+    static final String INGEST_VERSION = "0.1.1";
     private static final String HELP = """
             RepeatLab data CLI
             Usage: java -jar repeatlab-data.jar ingest --input <xlsx> --output <new-directory>
                    java -jar repeatlab-data.jar clean --input <ingest-dir> --config <json> --output <new-directory>
+                   java -jar repeatlab-data.jar snapshot --input <ingest-dir> --config <json> --snapshot-time <timestamp> --observed-until <timestamp> --output <new-directory> [--lookback-days <days>] [--horizon-days <days>]
                    java -jar repeatlab-data.jar analyze --input <clean-dir> --python <python-executable> --output <new-directory>
                    java -jar repeatlab-data.jar duplicate-sensitivity --input <clean-dir> --python <python-executable> --output <new-directory>
                    java -jar repeatlab-data.jar cohorts --input <orders-dir> --observed-from <timestamp> --observed-until <timestamp> --output <new-directory>
@@ -32,6 +34,11 @@ public final class Main {
 
     public static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) { out.print(HELP); return 0; }
+        if (args.length > 0 && args[0].equals("snapshot")) {
+            int result = SnapshotCommand.run(args, out, err);
+            if (result == 64) err.print(HELP);
+            return result;
+        }
         if (args.length > 0 && args[0].equals("duplicate-sensitivity")) {
             int result = DuplicateSensitivityCommand.run(args, out, err);
             if (result == 64) err.print(HELP);
@@ -75,6 +82,8 @@ public final class Main {
         TransactionalOutput transaction = null;
         Instant started = Instant.now();
         try {
+            output = ObservedOrdersArguments.resolveOutput(output);
+            input = ObservedOrdersArguments.resolveSource(input, output, "workbook");
             transaction = new TransactionalOutput(output);
             Path stage = transaction.staging();
             Path snapshot = stage.resolve("source.xlsx");
@@ -93,7 +102,7 @@ public final class Main {
             Map<String, String> hashes = new LinkedHashMap<>();
             for (String artifact : TransactionalOutput.ARTIFACTS) hashes.put(artifact, Json.hash(stage.resolve(artifact)));
             Object stableParameters = Json.object("command", "ingest", "profile", Profile.VERSION);
-            Object manifest = Json.object("schema_version", 1, "tool_version", VERSION, "profile", Profile.VERSION,
+            Object manifest = Json.object("schema_version", 1, "tool_version", INGEST_VERSION, "profile", Profile.VERSION,
                     "status", "completed", "data_status", audit.dataStatus(), "date_system", workbook.dateSystem(),
                     "source", Json.object("basename", input.getFileName().toString(), "sha256", sourceHash),
                     "parameters", stableParameters, "parameters_sha256", Json.hashText(Json.encode(stableParameters)),
