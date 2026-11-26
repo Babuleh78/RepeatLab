@@ -3,7 +3,6 @@ package io.repeatlab.ingestion;
 import java.io.IOException;
 import java.io.Writer;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -21,6 +20,7 @@ import java.util.TreeMap;
 final class QualityAudit {
     private final Writer issues;
     private final String sourceHash;
+    private final boolean legacyDates;
     private final Map<String, Long> counts = new TreeMap<>();
     private final Map<String, Long> missing = new TreeMap<>();
     private final Map<Integer, Map<String, Long>> bySheet = new TreeMap<>();
@@ -30,8 +30,13 @@ final class QualityAudit {
     private LocalDateTime min, max;
 
     QualityAudit(Writer issues, String sourceHash) {
+        this(issues, sourceHash, false);
+    }
+
+    QualityAudit(Writer issues, String sourceHash, boolean legacyDates) {
         this.issues = issues;
         this.sourceHash = sourceHash;
+        this.legacyDates = legacyDates;
         for (String key : List.of("invoice", "customer_id", "stock_code")) keys.put(key, new HashSet<>());
         Profile.FIELDS.forEach(field -> missing.put(field, 0L));
     }
@@ -59,9 +64,14 @@ final class QualityAudit {
                 keys.get(field).add(Json.hashText(Json.encode(cell.content())));
         }
         Cell quantityCell = cells.get(schema.get("quantity"));
-        BigInteger quantity = null;
+        BigDecimal quantity = null;
         if (!quantityCell.isFormula()) {
-            try { quantity = decimal(quantityCell).toBigIntegerExact(); }
+            try {
+                BigDecimal parsed = decimal(quantityCell);
+                if (parsed.scale() > 0 && parsed.stripTrailingZeros().scale() > 0)
+                    throw new IllegalArgumentException("Fractional quantity");
+                quantity = parsed;
+            }
             catch (IllegalArgumentException | ArithmeticException e) {
                 issue("INVALID_QUANTITY", "error", sheet, name, row, quantityCell,
                         "Expected a finite integral quantity", null);
@@ -88,7 +98,8 @@ final class QualityAudit {
         Cell dateCell = cells.get(schema.get("invoice_date"));
         if (!dateCell.isFormula()) {
             try {
-                LocalDateTime date = date(dateCell, date1904);
+                LocalDateTime date = legacyDates ? legacyDate(dateCell, date1904)
+                        : ExactEventTime.parse(dateCell, date1904 ? "1904" : "1900").auditTime();
                 if (min == null || date.isBefore(min)) min = date;
                 if (max == null || date.isAfter(max)) max = date;
             } catch (IllegalArgumentException | java.time.DateTimeException | ArithmeticException e) {
@@ -117,14 +128,16 @@ final class QualityAudit {
         return new BigDecimal(cell.value());
     }
 
-    private static LocalDateTime date(Cell cell, boolean date1904) {
+    // Rebuild the original audit when verifying an existing 0.1.0 dataset.
+    private static LocalDateTime legacyDate(Cell cell, boolean date1904) {
         if (cell.empty() || !cell.scalar()) throw new IllegalArgumentException("Not a date cell");
         LocalDateTime result;
         if (cell.source_type().equals("n")) {
             BigDecimal serial = new BigDecimal(cell.value());
             if (serial.signum() < 0 || serial.compareTo(new BigDecimal("2958466")) >= 0)
                 throw new IllegalArgumentException("Serial outside supported calendar");
-            long days = serial.setScale(0, RoundingMode.DOWN).longValueExact();
+            if (serial.compareTo(new BigDecimal("1E-15")) < 0) serial = BigDecimal.ZERO;
+            long days = serial.longValue();
             result = excelDate(serial, days, date1904);
         } else {
             String value = cell.value();

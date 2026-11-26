@@ -51,6 +51,51 @@ def records(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+@pytest.mark.parametrize(
+    ("command", "overlap"),
+    [
+        (cmd, case)
+        for cmd in ("analyze", "clean", "ingest")
+        for case in ("equal", "ancestor", "nested")
+    ]
+    + [("clean", "config")],
+)
+def test_output_reservation_preserves_source_paths(
+    tmp_path: Path, command: str, overlap: str
+) -> None:
+    output = tmp_path / "result"
+    source = output if overlap == "equal" else output / "input"
+    config = tmp_path / "policy.json"
+    if overlap == "nested":
+        source = tmp_path / "input"
+        source.mkdir()
+        output = source / "result"
+    if overlap == "config":
+        source, config = tmp_path / "input", output
+    extra = ["--config", str(config)] if command == "clean" else ["--python", sys.executable]
+    if command == "ingest":
+        extra = []
+    result = subprocess.run(
+        [
+            java_command(),
+            "-jar",
+            str(JAR),
+            command,
+            "--input",
+            str(source),
+            *extra,
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert b"overlap" in result.stderr
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("shadow_source", ["cwd", "pythonpath"])
 def test_analyze_uses_installed_worker_despite_caller_import_paths(
     tmp_path: Path, shadow_source: str
@@ -242,7 +287,7 @@ def test_worker_protocol_cannot_publish_false_completion(tmp_path: Path, mode: s
     # Select a disposable interpreter with a test-only installed worker at the process boundary.
     script = (
         "import pathlib, shutil, sys\n"
-        "print('o' * 1100000)\nprint('e' * 1100000, file=sys.stderr)\n"
+        "print('o' * 3000000)\nprint('e' * 3000000, file=sys.stderr)\n"
         f"mode = {mode!r}\n"
         "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
         "source = pathlib.Path(sys.argv[sys.argv.index('--input') + 1])\n"
@@ -250,7 +295,7 @@ def test_worker_protocol_cannot_publish_false_completion(tmp_path: Path, mode: s
         "if mode in ('exit_mismatch', 'changed_snapshot', 'publication_io'):\n"
         "    shutil.copytree(template, output)\n"
         "if mode == 'publication_io':\n"
-        "    (output.parent / 'monthly_activity.jsonl').mkdir()\n"
+        "    (output.parent.parent / 'monthly_activity.jsonl').mkdir()\n"
         "if mode == 'changed_snapshot':\n"
         "    (source / 'clean_events.jsonl').write_text('changed')\n"
         "sys.exit(7 if mode == 'nonzero' else 2 if mode == 'exit_mismatch' else 0)\n"
@@ -261,11 +306,32 @@ def test_worker_protocol_cannot_publish_false_completion(tmp_path: Path, mode: s
     assert result.returncode == 1, result.stderr
     assert not (output / "manifest.json").exists()
     assert (output / "fatal.json").is_file()
-    assert (output / "worker.stdout.log").stat().st_size > 1_000_000
-    assert (output / "worker.stderr.log").stat().st_size > 1_000_000
+    for log_name in ("worker.stdout.log", "worker.stderr.log"):
+        diagnostic = (output / log_name).read_bytes()
+        assert 2 * 1024**2 < len(diagnostic) < 2 * 1024**2 + 64
+        assert diagnostic.endswith(b"[worker log truncated]\n")
     if mode == "publication_io":
         assert (output / "orders/manifest.json").is_file()
         assert json.loads((output / "fatal.json").read_text())["stage"] == "publication"
+    else:
+        assert not (output / "orders").exists()
+    assert not (output / ".partial").exists()
+
+
+def test_worker_timeout_aborts_before_orders_publication(tmp_path: Path) -> None:
+    clean = run_clean(tmp_path / "source", [])
+    python = install_test_worker(tmp_path / "worker", "import time\ntime.sleep(120)\n")
+    output = tmp_path / "result"
+    env = dict(os.environ)
+    env["JAVA_TOOL_OPTIONS"] = (
+        env.get("JAVA_TOOL_OPTIONS", "") + " -Drepeatlab.worker.timeoutSeconds=1"
+    )
+    result = analyze(clean, output, python=python, env=env)
+    assert result.returncode == 1
+    fatal = json.loads((output / "fatal.json").read_bytes())
+    assert fatal["stage"] == "worker" and "timeout" in fatal["message"]
+    assert not (output / "orders").exists()
+    assert not (output / "manifest.json").exists()
 
 
 def test_grouped_sum_overflow_retains_orders(tmp_path: Path) -> None:

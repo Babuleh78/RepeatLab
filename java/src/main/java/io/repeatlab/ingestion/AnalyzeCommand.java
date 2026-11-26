@@ -29,6 +29,8 @@ final class AnalyzeCommand {
         String stageName = "snapshot";
         Instant started = Instant.now();
         try {
+            output = ObservedOrdersArguments.resolveOutput(output);
+            input = ObservedOrdersArguments.resolveSource(input, output, "clean");
             Files.createDirectory(output); reserved = true;
             Path stage = Files.createDirectory(output.resolve(".partial"));
             Path clean = Files.createDirectory(stage.resolve("clean"));
@@ -38,13 +40,19 @@ final class AnalyzeCommand {
                 snapshotHashes.put(name, Json.hash(clean.resolve(name)));
             }
             stageName = "worker";
-            int code = worker(parameters.get("--python"), clean, output.resolve("orders"), output);
+            Path workerOrders = stage.resolve("worker-orders");
+            int code = worker(parameters.get("--python"), clean, workerOrders, output);
             StrictJson.require(code == 0 || code == 2, "Orders worker exited " + code);
             for (var entry : snapshotHashes.entrySet())
                 StrictJson.require(Json.hash(clean.resolve(entry.getKey())).equals(entry.getValue()), "Worker changed clean snapshot");
             stageName = "orders_validation";
-            OrdersDataset dataset = new OrdersDataset(output.resolve("orders"), clean, stage.resolve("verified-orders"));
+            Path verifiedOrders = stage.resolve("verified-orders");
+            OrdersDataset dataset = new OrdersDataset(workerOrders, clean, verifiedOrders);
             StrictJson.require(code == (dataset.dataStatus.equals("quarantined") ? 2 : 0), "Worker exit/quality mismatch");
+            Json.write(verifiedOrders.resolve("run.json"), Json.object("schema", "repeatlab-orders", "schema_version", 1,
+                    "status", "completed", "data_status", dataset.dataStatus));
+            Files.move(verifiedOrders, output.resolve("orders"), StandardCopyOption.ATOMIC_MOVE);
+            removeTree(workerOrders);
             stageName = "sql";
             SqlAnalytics.Result sql = SqlAnalytics.run(dataset.orders, stage);
             Json.write(stage.resolve("audit.json"), Json.object("schema", "repeatlab-analytics", "schema_version", 1,
@@ -83,6 +91,10 @@ final class AnalyzeCommand {
                 err.println(Json.encode(fatal));
                 if (reserved) Json.write(output.resolve("fatal.json"), fatal);
             } catch (IOException diagnosticFailure) { err.println("ANALYTICS_FAILED: unable to persist diagnostics"); }
+            if (reserved && Files.isDirectory(output.resolve(".partial"))) {
+                try { removeTree(output.resolve(".partial")); }
+                catch (IOException cleanupFailure) { err.println("Unable to remove analytics staging directory"); }
+            }
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             return 1;
         }
@@ -94,16 +106,7 @@ final class AnalyzeCommand {
     }
 
     static int runProcess(List<String> command, Path output) throws IOException, InterruptedException {
-        // Direct arguments and file redirection keep diagnostic streams out of the data protocol and avoid pipe deadlock.
-        Process process = new ProcessBuilder(command)
-                .redirectOutput(output.resolve("worker.stdout.log").toFile())
-                .redirectError(output.resolve("worker.stderr.log").toFile()).start();
-        try { return process.waitFor(); }
-        catch (InterruptedException interrupted) {
-            process.destroyForcibly();
-            try { process.waitFor(); } catch (InterruptedException again) { interrupted.addSuppressed(again); }
-            throw interrupted;
-        }
+        return WorkerProcess.run(command, output);
     }
 
     static void removeTree(Path root) throws IOException {

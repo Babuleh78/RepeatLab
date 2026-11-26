@@ -28,6 +28,9 @@ final class CleanCommand {
         TransactionalOutput transaction = null;
         Instant started = Instant.now();
         try {
+            output = ObservedOrdersArguments.resolveOutput(output);
+            input = ObservedOrdersArguments.resolveSource(input, output, "raw");
+            config = ObservedOrdersArguments.resolveSource(config, output, "config");
             transaction = new TransactionalOutput(output);
             CleaningPolicy policy = CleaningPolicy.read(config);
             RawDataset raw = new RawDataset(input, transaction.staging());

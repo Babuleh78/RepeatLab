@@ -5,6 +5,7 @@ import static io.repeatlab.ingestion.WorkbookFixture.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
@@ -220,6 +221,35 @@ class IngestionTest {
         assertEquals("failed", fatal.path("status").asText());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", "<sheetData/><sheetData/>", "<extLst><sheetData/></extLst>",
+            "<sheetData xmlns=\"urn:other\"/>", "<sheetData><wrapper><row/></wrapper></sheetData>"})
+    void requiresOneWorksheetGridAtTheExpectedPath(String contents) throws Exception {
+        Path source = write(temp.resolve("grid.xlsx"), false, header() + data(2), "");
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Files.writeString(parts.getPath("/xl/worksheets/sheet2.xml"),
+                    "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+                    + contents + "</worksheet>");
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertEquals(2, json(out.resolve("fatal.json")).path("sheet_index").intValue());
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
+    @Test void ignoresExtensionMarkupOutsideTheGrid() throws Exception {
+        Path source = write(temp.resolve("extension.xlsx"), false, header() + data(2));
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path sheet = parts.getPath("/xl/worksheets/sheet1.xml");
+            Files.writeString(sheet, Files.readString(sheet).replace("</worksheet>",
+                    "<extLst><ext uri=\"x\"><sheetData xmlns=\"urn:other\"><row r=\"12\"/>"
+                    + "</sheetData></ext></extLst></worksheet>"));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(0, ingest(source, out));
+        assertEquals(2, lines(out.resolve("raw_transactions.jsonl")).size());
+    }
+
     @Test void excludesPhoneticAnnotationsFromSharedAndInlineIdentifiers() throws Exception {
         String shared = data(2).replace(text("G2", "00042"), "<c r=\"G2\" t=\"s\"><v>1</v></c>");
         String inline = data(3).replace(text("G3", "00042"),
@@ -247,6 +277,47 @@ class IngestionTest {
         assertEquals(value, json(out.resolve("audit.json")).path("date_range").path("max").asText());
     }
 
+    @Test void decodesStringEscapesOnceAcrossStorageTypesAndPreservesRawCache() throws Exception {
+        String encoded = "A_x000D_B_x005F_x000D_";
+        String expected = "A\rB_x000D_";
+        String row = data(2).replace(text("A2", "X1"), text("A2", encoded))
+                .replace(text("B2", "0007"), "<c r=\"B2\" t=\"s\"><v>1</v></c>")
+                .replace(text("C2", " product\u00a0 "), "<c r=\"C2\" t=\"str\"><v>" + encoded + "</v></c>")
+                .replace(text("H2", "Testland"), "<c r=\"H2\" t=\"str\"><f>F()</f><v>" + encoded + "</v></c>");
+        Path source = write(temp.resolve("escapes.xlsx"), false, header() + row);
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path shared = parts.getPath("/xl/sharedStrings.xml");
+            Files.writeString(shared, Files.readString(shared).replace("<t>BASE</t>", "<t>" + encoded + "</t>"));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(0, ingest(source, out));
+        JsonNode cells = lines(out.resolve("raw_transactions.jsonl")).get(1).path("cells");
+        for (int column : List.of(0, 1, 2)) assertEquals(expected, cells.get(column).path("value").textValue());
+        assertEquals(encoded, cells.get(0).path("raw_value").textValue());
+        assertEquals("1", cells.get(1).path("raw_value").textValue());
+        assertEquals(encoded, cells.get(2).path("raw_value").textValue());
+        assertEquals(expected, cells.get(7).path("cached_value").textValue());
+        assertEquals(encoded, cells.get(7).path("raw_value").textValue());
+        Path config = Files.writeString(temp.resolve("config.json"), "{\"policy_version\":\"clean-v1\",\"service_codes\":[]}");
+        assertEquals(0, invoke("clean", "--input", out.toString(), "--config", config.toString(),
+                "--output", temp.resolve("clean").toString()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"empty-name", "unknown-state"})
+    void rejectsSheetMetadataThatCleanCannotConsume(String problem) throws Exception {
+        Path source = write(temp.resolve("metadata.xlsx"), false, header());
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path workbook = parts.getPath("/xl/workbook.xml");
+            String xml = Files.readString(workbook);
+            Files.writeString(workbook, problem.equals("empty-name") ? xml.replace("Sheet1", "")
+                    : xml.replace("visible", "unknown"));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"inlineStr", "d"})
     void reportsYear10000WithoutLosingTextOrDateCells(String type) throws Exception {
@@ -267,6 +338,69 @@ class IngestionTest {
                 && n.path("column").asText().equals("E")));
         assertEquals("1900-01-01T12:00:00", json(out.resolve("audit.json")).path("date_range").path("max").asText());
         assertEquals("errors", json(out.resolve("manifest.json")).path("data_status").asText());
+    }
+
+    @Test void auditAndCleanUseTheSameDateDomainAndKeepTheirDisplayPrecision() throws Exception {
+        String first = data(2).replace(number("E2", "1.5"), text("E2", "2000-01-01T12:00:00.1234567896"));
+        String last = data(3).replace("X1", "X2").replace("1.5", "2958465.9999999999999999999");
+        String invalid = data(4).replace("X1", "X3").replace(number("E4", "1.5"), text("E4", "0000-12-31"));
+        Path source = write(temp.resolve("dates.xlsx"), false, header() + first + last + invalid);
+        Path out = temp.resolve("out");
+        assertEquals(2, ingest(source, out));
+        JsonNode range = json(out.resolve("audit.json")).path("date_range");
+        assertEquals("2000-01-01T12:00:00.12345679", range.path("min").textValue());
+        assertEquals("9999-12-31T23:59:59.999999999", range.path("max").textValue());
+        assertEquals(List.of(4), lines(out.resolve("issues.jsonl")).stream()
+                .filter(issue -> issue.path("code").asText().equals("INVALID_DATE"))
+                .map(issue -> issue.path("row_number").intValue()).toList());
+        Path config = Files.writeString(temp.resolve("config.json"), "{\"policy_version\":\"clean-v1\",\"service_codes\":[]}");
+        Path clean = temp.resolve("clean");
+        assertEquals(2, invoke("clean", "--input", out.toString(), "--config", config.toString(), "--output", clean.toString()));
+        assertEquals(List.of("2000-01-01T12:00:00.123456", "9999-12-31T23:59:59.999999"),
+                lines(clean.resolve("clean_events.jsonl")).stream().map(event -> event.path("event_time").textValue()).toList());
+    }
+
+    @Test void comparesCompactScientificSerialsExactlyBeforeDisplay() {
+        ExactEventTime zero = serial("0");
+        ExactEventTime tiny = serial("1E-200000");
+        assertEquals(zero.formatted(), tiny.formatted());
+        assertEquals(zero.auditTime(), tiny.auditTime());
+        assertTrue(tiny.losesPrecision());
+        assertTrue(tiny.compareTo(zero) > 0);
+        assertTrue(tiny.compareTo(serial("2E-200000")) < 0);
+        assertThrows(IllegalArgumentException.class, () -> serial("1E+200000"));
+    }
+
+    private static ExactEventTime serial(String value) {
+        return ExactEventTime.parse(new Cell("E", "E2", "n", "value", value, value, null, null, null), "1900");
+    }
+
+    @Test void readsExistingRawWithOriginalDateAndStringSemantics() throws Exception {
+        String row = data(2).replace(number("E2", "1.5"), text("E2", "0001-01-01"))
+                .replace(text("C2", " product\u00a0 "), "<c r=\"C2\" t=\"str\"><v>ABC</v></c>");
+        Path source = write(temp.resolve("legacy.xlsx"), false, header() + row);
+        Path raw = temp.resolve("raw");
+        assertEquals(0, ingest(source, raw));
+        // A 0.1.0 producer accepted year zero and kept an escaped str value verbatim.
+        Path rows = raw.resolve("raw_transactions.jsonl"), audit = raw.resolve("audit.json");
+        Files.writeString(rows, Files.readString(rows).replace("0001-01-01", "0000-01-01").replace("ABC", "A_x000D_B"));
+        Files.writeString(audit, Files.readString(audit).replace("0001-01-01", "0000-01-01"));
+        Path manifestPath = raw.resolve("manifest.json");
+        ObjectNode manifest = (ObjectNode) json(manifestPath);
+        manifest.put("tool_version", "0.1.0");
+        ObjectNode hashes = (ObjectNode) manifest.get("artifacts");
+        hashes.put("raw_transactions.jsonl", hash(rows));
+        hashes.put("audit.json", hash(audit));
+        Files.writeString(manifestPath, JSON.writeValueAsString(manifest));
+        Path config = Files.writeString(temp.resolve("config.json"), "{\"policy_version\":\"clean-v1\",\"service_codes\":[]}");
+        Path clean = temp.resolve("clean");
+        assertEquals(2, invoke("clean", "--input", raw.toString(), "--config", config.toString(), "--output", clean.toString()));
+        assertTrue(Files.exists(clean.resolve("manifest.json")));
+        // The same scalar cell and audit would violate the current producer contract.
+        manifest.put("tool_version", Main.INGEST_VERSION);
+        Files.writeString(manifestPath, JSON.writeValueAsString(manifest));
+        assertEquals(1, invoke("clean", "--input", raw.toString(), "--config", config.toString(),
+                "--output", temp.resolve("refused").toString()));
     }
 
     private static String hash(Path path) throws Exception {

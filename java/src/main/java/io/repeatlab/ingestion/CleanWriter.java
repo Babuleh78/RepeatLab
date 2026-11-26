@@ -6,60 +6,32 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
 final class CleanWriter {
     static final List<String> ARTIFACTS = List.of("clean_events.jsonl", "dispositions.jsonl", "audit.json");
-    private final Map<String, Invoice> invoices = new HashMap<>();
+    private final Map<String, InvoiceState> invoices = new HashMap<>();
     private final Map<String, Long> counts = new TreeMap<>();
     private final Map<String, Long> reasonCounts = new TreeMap<>();
-
-    private static final class Invoice {
-        boolean invalid, customerSeen, kindSeen, timeSeen;
-        String customer, kind;
-        ExactEventTime time;
-        final Set<String> conflicts = new TreeSet<>();
-
-        void add(EventNormalizer.Event event) {
-            if (!event.reasons().isEmpty()) invalid = true;
-            if (!event.reasons().contains("INVALID_CUSTOMER_ID")) {
-                if (customerSeen && !Objects.equals(customer, event.customer()))
-                    conflicts.add("INVOICE_CONFLICT_CUSTOMER_ID");
-                customer = event.customer();
-                customerSeen = true;
-            }
-            if (event.kind() != null) {
-                if (kindSeen && !kind.equals(event.kind())) conflicts.add("INVOICE_CONFLICT_KIND");
-                kind = event.kind();
-                kindSeen = true;
-            }
-            if (event.time() != null) {
-                if (timeSeen && time.seconds().compareTo(event.time().seconds()) != 0)
-                    conflicts.add("INVOICE_CONFLICT_EVENT_TIME");
-                time = event.time();
-                timeSeen = true;
-            }
-        }
-    }
 
     CleanWriter(RawDataset raw, CleaningPolicy policy, Path stage) throws IOException {
         for (String name : List.of("data_rows", "accepted_rows", "accepted_product_rows", "accepted_service_rows",
                 "quarantined_rows", "missing_customer_rows", "header_rows", "empty_rows", "warning_rows")) counts.put(name, 0L);
         counts.put("header_rows", raw.headerRows);
         counts.put("empty_rows", raw.emptyRows);
+        var normalizer = new EventNormalizer();
         raw.rows(row -> {
-            var event = EventNormalizer.normalize(row, raw.dateSystem);
-            if (event.invoice() != null) invoices.computeIfAbsent(event.invoice(), ignored -> new Invoice()).add(event);
+            var event = normalizer.normalize(row, raw.dateSystem);
+            if (event.invoice() != null) invoices.computeIfAbsent(event.invoice(), ignored -> new InvoiceState()).add(event, policy);
         });
         try (var events = Files.newBufferedWriter(stage.resolve("clean_events.jsonl"));
              var dispositions = Files.newBufferedWriter(stage.resolve("dispositions.jsonl"))) {
             raw.rows(row -> {
-                var event = EventNormalizer.normalize(row, raw.dateSystem);
+                var event = normalizer.normalize(row, raw.dateSystem);
                 Set<String> reasons = new TreeSet<>(event.reasons());
-                Invoice invoice = event.invoice() == null ? null : invoices.get(event.invoice());
+                InvoiceState invoice = event.invoice() == null ? null : invoices.get(event.invoice());
                 if (invoice != null) {
                     if (invoice.invalid) reasons.add("INVOICE_INVALID");
                     reasons.addAll(invoice.conflicts);

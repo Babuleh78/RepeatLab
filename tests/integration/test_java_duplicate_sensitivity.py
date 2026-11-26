@@ -1,6 +1,7 @@
 """Exercise the packaged CLI, installed worker and monthly comparisons together."""
 
 import hashlib
+import json
 import subprocess
 import sys
 from decimal import Decimal
@@ -185,7 +186,13 @@ def test_faulty_worker_cannot_publish_a_completed_report(
     script = (
         "import sys\nfrom pathlib import Path\n"
         "clean = Path(sys.argv[sys.argv.index('--input') + 1])\n"
-        "facts = Path(sys.argv[sys.argv.index('--output') + 1])\n" + worker_script
+        "facts = Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        f"{worker_script}\n"
+        "if facts.exists():\n"
+        "    import hashlib, json\n"
+        "    clean_hash = hashlib.sha256((clean/'manifest.json').read_bytes()).hexdigest()\n"
+        "    print(json.dumps({'protocol_version': 1, 'clean_manifest_sha256': clean_hash, "
+        "'facts_sha256': hashlib.sha256(facts.read_bytes()).hexdigest()}))\n"
     )
     interpreter = install_test_worker(tmp_path / "worker", script, module="duplicate_sensitivity")
     output = tmp_path / "out"
@@ -194,3 +201,53 @@ def test_faulty_worker_cannot_publish_a_completed_report(
     assert document(output / "fatal.json")["stage"] == stage
     assert not (output / "manifest.json").exists()
     assert sha256(clean / "clean_events.jsonl") == original
+
+
+def test_worker_cannot_replay_another_dataset_with_the_same_line_count(tmp_path: Path) -> None:
+    clean = run_clean(
+        tmp_path / "source", [(invoice, "P", "1", JAN, "7", "A") for invoice in ("S1", "S2")]
+    )
+    other = run_clean(tmp_path / "other", [("S1", "P", "1", JAN, "7", "A")] * 2)
+    cached = tmp_path / "cached-facts.jsonl"
+    producer = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "repeatlab.duplicate_sensitivity",
+            "--input",
+            str(other),
+            "--output",
+            str(cached),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    receipt = json.loads(producer.stdout)
+    reply = tmp_path / "worker-reply"
+    interpreter = install_test_worker(
+        tmp_path / "worker",
+        "import shutil, sys\nfrom pathlib import Path\n"
+        f"shutil.copyfile({str(cached)!r}, sys.argv[sys.argv.index('--output') + 1])\n"
+        f"print(Path({str(reply)!r}).read_text(encoding='utf-8'))\n",
+        module="duplicate_sensitivity",
+    )
+    source_hash = sha256(clean / "manifest.json")
+    for name, claim, stage in [
+        ("stale-input", receipt, "worker"),
+        (
+            "wrong-facts-hash",
+            {**receipt, "clean_manifest_sha256": source_hash, "facts_sha256": "0" * 64},
+            "worker",
+        ),
+        ("wrong-orders", {**receipt, "clean_manifest_sha256": source_hash}, "sql"),
+    ]:
+        reply.write_text(json.dumps(claim), encoding="utf-8")
+        output = tmp_path / name
+        result = run_comparison(clean, output, python=str(interpreter))
+        assert result.returncode == 1, result.stderr
+        assert document(output / "fatal.json")["stage"] == stage
+        assert not (output / "manifest.json").exists()

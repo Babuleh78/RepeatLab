@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.apache.poi.xssf.usermodel.XSSFRichTextString;
 
 final class RawDataset {
     private final Path snapshot;
@@ -19,6 +20,7 @@ final class RawDataset {
     private final String manifestHash;
     final String sourceHash;
     final String dateSystem;
+    private final boolean legacyIngest;
     private final List<SheetState> sheets = new ArrayList<>();
     long dataRows, headerRows, emptyRows;
 
@@ -72,7 +74,9 @@ final class RawDataset {
         StrictJson.keys(manifest, "schema_version", "tool_version", "profile", "status", "data_status",
                 "date_system", "source", "parameters", "parameters_sha256", "sheets", "artifacts");
         StrictJson.version(manifest);
-        StrictJson.require(Main.VERSION.equals(StrictJson.text(manifest.get("tool_version"))), "Unsupported ingest tool version");
+        String toolVersion = StrictJson.text(manifest.get("tool_version"));
+        legacyIngest = toolVersion.equals("0.1.0");
+        StrictJson.require(legacyIngest || toolVersion.equals(Main.INGEST_VERSION), "Unsupported ingest tool version");
         StrictJson.require(Profile.VERSION.equals(StrictJson.text(manifest.get("profile"))), "Unsupported ingest profile");
         StrictJson.require("completed".equals(StrictJson.text(manifest.get("status"))), "Input is not completed");
         StrictJson.require(Set.of("ok", "warnings", "errors").contains(StrictJson.text(manifest.get("data_status"))), "Invalid data status");
@@ -106,7 +110,7 @@ final class RawDataset {
         QualityAudit audit;
         try (var writer = Files.newBufferedWriter(expectedIssues);
              var rows = Files.newBufferedReader(snapshot.resolve("raw_transactions.jsonl"))) {
-            audit = new QualityAudit(writer, sourceHash);
+            audit = new QualityAudit(writer, sourceHash, legacyIngest);
             int previousSheet = 1;
             for (String line; (line = rows.readLine()) != null;) {
                 JsonNode node = StrictJson.parse(line);
@@ -180,7 +184,7 @@ final class RawDataset {
         Files.delete(snapshot);
     }
 
-    private static List<Cell> cells(JsonNode nodes, int row) throws IOException {
+    private List<Cell> cells(JsonNode nodes, int row) throws IOException {
         StrictJson.require(nodes != null && nodes.isArray() && nodes.size() <= 16384, "Invalid cells");
         List<Cell> result = new ArrayList<>(nodes.size());
         for (JsonNode node : nodes) {
@@ -209,8 +213,14 @@ final class RawDataset {
                 StrictJson.require(expected.equals(state), "Invalid cell state");
                 StrictJson.require(formula == null ? cached == null : value == null, "Invalid formula value");
                 String resolved = formula == null ? value : cached;
-                if (!type.equals("s") && !type.equals("inlineStr"))
-                    StrictJson.require(Objects.equals(raw, resolved), "Raw scalar value mismatch");
+                if (!legacyIngest && type.equals("inlineStr") && raw != null)
+                    StrictJson.require(!raw.equals(resolved) && XSSFRichTextString.utfDecode(raw).equals(resolved),
+                            "Inline string escape mismatch");
+                if (!type.equals("s") && !type.equals("inlineStr")) {
+                    String expectedValue = !legacyIngest && type.equals("str") && raw != null
+                            ? XSSFRichTextString.utfDecode(raw) : raw;
+                    StrictJson.require(Objects.equals(expectedValue, resolved), "Raw scalar value mismatch");
+                }
                 if (type.equals("s")) {
                     StrictJson.require((raw == null) == (resolved == null), "Missing shared string index");
                     if (raw != null) {

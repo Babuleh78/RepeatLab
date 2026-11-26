@@ -62,7 +62,14 @@ def build_snapshot(
     if observed_until < snapshot_time:
         raise ValueError("observed_until must not precede snapshot_time")
 
-    history_start = snapshot_time - timedelta(days=lookback_days)
+    # No source event can precede datetime.min, even when the lookback spans it.
+    history_start = (
+        datetime.min
+        if lookback_days > (snapshot_time - datetime.min).days
+        else snapshot_time - timedelta(days=lookback_days)
+    )
+    if horizon_days > (datetime.max - snapshot_time).days:
+        raise ValueError("label_end is outside the supported datetime range")
     label_end = snapshot_time + timedelta(days=horizon_days)
     complete = observed_until >= label_end
     history_counts: dict[str, int] = {}

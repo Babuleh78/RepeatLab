@@ -81,7 +81,7 @@ class AnalyticsTest {
         assertThrows(java.sql.SQLException.class, () -> SqlAnalytics.run(List.of(order("I", maximum), order("J", "1")), decimalOverflow));
     }
 
-    private Path[] exchange(String amount) throws Exception {
+    private Path[] exchange(String price, String amount) throws Exception {
         Path folder = Files.createTempDirectory(temp, "exchange");
         Path clean = Files.createDirectory(folder.resolve("clean"));
         Path orders = Files.createDirectory(folder.resolve("orders"));
@@ -90,7 +90,7 @@ class AnalyticsTest {
                 "header_rows", 1, "empty_rows", 0, "warning_rows", 0);
         Json.write(clean.resolve("clean_events.jsonl"), Json.object("event_id", "e1", "invoice_id", "I", "customer_id", "A",
                 "event_time", "2020-01-01T00:00:00", "kind", "sale", "quantity", new BigInteger("100000000000000000000"),
-                "stock_code", "P", "unit_price", "0.01", "is_service", false));
+                "stock_code", "P", "unit_price", price, "is_service", false));
         Json.write(clean.resolve("dispositions.jsonl"), Json.object());
         Json.write(clean.resolve("audit.json"), Json.object());
         Map<String, Object> cleanHashes = Json.object();
@@ -117,7 +117,7 @@ class AnalyticsTest {
     }
 
     @Test void canonicalOrdersReaderDoesNotNarrowQuantityOrDecimalExponent() throws Exception {
-        Path[] paths = exchange("1E+2147483648");
+        Path[] paths = exchange("1E+2147483628", "1E+2147483648");
         OrdersDataset data = new OrdersDataset(paths[0], paths[1], paths[2]);
         assertEquals(new BigInteger("100000000000000000000"), data.orders.getFirst().quantity());
         assertEquals("1E+2147483648", data.orders.getFirst().amount());
@@ -131,11 +131,22 @@ class AnalyticsTest {
         assertEquals(new BigInteger(integer), OrdersDataset.rows(path).getFirst().get("quantity").bigIntegerValue());
     }
 
+    @Test void exactReconciliationCarriesAcrossScalesWithoutExpandingExponentGaps() throws Exception {
+        var sum = new ExactDecimal.Sum();
+        sum.add(ExactDecimal.parse("0.0150"), BigInteger.valueOf(-2));
+        sum.add(ExactDecimal.parse("0.0700"), BigInteger.valueOf(-1));
+        sum.add(ExactDecimal.parse("10"), BigInteger.valueOf(-2));
+        assertTrue(sum.matches(ExactDecimal.parse("-20.1")));
+        assertFalse(sum.matches(ExactDecimal.parse("-20.1001")));
+        assertFalse(sum.matches(ExactDecimal.parse("-1E+999999999999")));
+        assertFalse(sum.matches(ExactDecimal.parse("-1E-999999999999")));
+    }
+
     @ParameterizedTest
     @ValueSource(strings={"quantity", "key", "sign", "time", "lineage", "counts", "duplicate-key", "hash",
-            "schema", "version", "extra", "stock", "customer", "money", "repeated-order", "repeated-lineage", "audit"})
+            "schema", "version", "extra", "stock", "customer", "money", "repeated-order", "repeated-lineage", "audit", "wrong-total"})
     void strictReaderRejectsTamperedOrRehashedInvalidExchange(String mutation) throws Exception {
-        Path[] paths = exchange("0.335");
+        Path[] paths = exchange("3.35E-21", "0.335");
         Path artifact = paths[0].resolve("orders.jsonl");
         ObjectNode node = (ObjectNode) StrictJson.read(artifact);
         switch (mutation) {
@@ -149,6 +160,7 @@ class AnalyticsTest {
             case "extra" -> node.put("unexpected", true);
             case "stock" -> node.put("stock_code_count", 0);
             case "customer" -> node.put("customer_id", "\u00a0");
+            case "wrong-total" -> node.put("total_amount", "0.334");
             case "money" -> node.put("total_amount", "NaN");
             case "repeated-lineage" -> {
                 artifact = paths[0].resolve("lineage.jsonl");

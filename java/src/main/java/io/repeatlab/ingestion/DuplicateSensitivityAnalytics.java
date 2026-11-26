@@ -10,7 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.format.DateTimeParseException;
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -19,7 +19,7 @@ final class DuplicateSensitivityAnalytics {
     record Result(String engine, Map<String, String> sqlHashes, long rows, long orders,
                   long productLines, long collapsedLines) {}
     private record Counts(long orders, long retained, long collapsed, int scale) {}
-    private record Values(long lines, BigInteger units, BigDecimal amount) {
+    record Values(long lines, BigInteger units, BigDecimal amount) {
         static Values read(JsonNode node, int sign) throws IOException {
             StrictJson.keys(node, "lines", "units", "amount");
             long lines = StrictJson.integer(node.get("lines"), 1, Long.MAX_VALUE);
@@ -55,12 +55,13 @@ final class DuplicateSensitivityAnalytics {
 
     private DuplicateSensitivityAnalytics() {}
 
-    static Result run(Path facts, Path stage) throws IOException, SQLException {
+    static Result run(Path facts, Path stage, Path cleanEvents) throws IOException, SQLException {
+        var memberships = SensitivityOrderMembership.read(cleanEvents);
         Path spill = Files.createDirectory(stage.resolve("duckdb-temp"));
         try (Connection connection = DuckDbReports.connect(spill)) {
             String engine = DuckDbReports.version(connection);
             connection.setAutoCommit(false);
-            Counts counts = loadFacts(connection, facts);
+            Counts counts = loadFacts(connection, facts, memberships);
             String moneyType = "DECIMAL(38," + counts.scale() + ")";
             try (var statement = connection.createStatement()) {
                 statement.execute("CREATE TEMP VIEW scenario_orders AS SELECT * REPLACE ("
@@ -76,7 +77,8 @@ final class DuplicateSensitivityAnalytics {
         }
     }
 
-    private static Counts loadFacts(Connection connection, Path facts) throws IOException, SQLException {
+    private static Counts loadFacts(Connection connection, Path facts, Map<String, SensitivityOrderMembership> memberships)
+            throws IOException, SQLException {
         // Amounts stay textual until all orders in both scenarios have determined the exact shared scale.
         try (var statement = connection.createStatement()) {
             statement.execute("CREATE TEMP TABLE facts (month VARCHAR, kind VARCHAR, customer_known BOOLEAN, "
@@ -100,16 +102,16 @@ final class DuplicateSensitivityAnalytics {
                 String kind = StrictJson.text(row.get("kind"));
                 StrictJson.require(kind.equals(cancellation ? "cancellation" : "sale"), "Invalid order kind");
                 String timestamp = StrictJson.text(row.get("event_time"));
-                try {
-                    ObservedOrdersArguments.parseBound(timestamp);
-                } catch (DateTimeParseException invalid) {
-                    throw new IOException("Invalid order timestamp", invalid);
-                }
+                LocalDateTime time = CleanOrderLine.timestamp(timestamp);
                 StrictJson.require(row.get("customer_known").isBoolean(), "Expected boolean customer_known");
+                boolean known = row.get("customer_known").booleanValue();
                 int sign = cancellation ? -1 : 1;
                 Values retained = Values.read(row.get("retained"), sign);
                 Values collapsed = Values.read(row.get("collapsed"), sign);
                 checkCollapse(retained, collapsed);
+                var membership = memberships.remove(key);
+                StrictJson.require(membership != null && membership.matches(time, kind, known, retained, collapsed),
+                        "Worker order does not match its clean product events");
                 scale = Math.max(scale, Math.max(retained.amount().scale(), collapsed.amount().scale()));
                 integerDigits = Math.max(integerDigits, Math.max(
                         retained.amount().precision() - retained.amount().scale(),
@@ -121,12 +123,13 @@ final class DuplicateSensitivityAnalytics {
 
                 insert.setString(1, timestamp.substring(0, 7));
                 insert.setString(2, kind);
-                insert.setBoolean(3, row.get("customer_known").booleanValue());
+                insert.setBoolean(3, known);
                 retained.bind(insert, 4);
                 collapsed.bind(insert, 7);
                 insert.addBatch();
                 if (orders % BATCH_SIZE == 0) insert.executeBatch();
             }
+            StrictJson.require(memberships.isEmpty(), "Worker omitted a clean product invoice");
             if (orders % BATCH_SIZE != 0) insert.executeBatch();
         }
         return new Counts(orders, retainedLines, collapsedLines, scale);

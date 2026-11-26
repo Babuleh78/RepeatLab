@@ -519,6 +519,13 @@ def test_unsupported_python_runtime_fails_before_reserving_output(
     assert not (tmp_path / "orders").exists()
 
 
+def test_missing_clean_cannot_be_reserved_as_worker_output(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(ValueError, match="overlaps"):
+        worker().write_orders_dataset(missing, missing)
+    assert not missing.exists()
+
+
 def test_repeated_runs_and_unicode_ordering_are_deterministic(tmp_path: Path) -> None:
     source = tmp_path / "clean"
     rows: list[tuple[str, str | None, str, int | str, str]] = [

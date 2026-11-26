@@ -3,10 +3,11 @@
 import argparse
 import json
 import os
+import shutil
 import sys
 from collections.abc import Iterable
 from decimal import Decimal
-from hashlib import sha256
+from hashlib import file_digest, sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, NoReturn
@@ -38,6 +39,11 @@ def _json_text(value: Any) -> str:
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     with path.open("xb") as stream:
         stream.write((_json_text(value) + "\n").encode("utf-8"))
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return file_digest(stream, "sha256").hexdigest()
 
 
 def _write_records(path: Path, records: Iterable[dict[str, Any]]) -> None:
@@ -110,13 +116,16 @@ def write_orders_dataset(input_path: Path, output_path: Path) -> str:
     """
     if sys.version_info[:2] != (3, 12):
         raise RuntimeError("the orders worker requires Python 3.12")
+    source, target = input_path.resolve(), output_path.resolve()
+    if target.is_relative_to(source) or source.is_relative_to(target):
+        raise ValueError("output directory overlaps input clean directory")
     output_path.mkdir(parents=True)
     stage = "snapshot_clean"
     try:
         with TemporaryDirectory(prefix=".clean-", dir=output_path) as temporary:
             snapshot = Path(temporary)
             for name in _CLEAN_FILES:
-                (snapshot / name).write_bytes((input_path / name).read_bytes())
+                shutil.copyfile(input_path / name, snapshot / name)
             manifest_bytes = (snapshot / "manifest.json").read_bytes()
             stage = "verify_clean"
             dataset = read_clean_dataset(snapshot)
@@ -142,7 +151,7 @@ def write_orders_dataset(input_path: Path, output_path: Path) -> str:
                 "counts": counts,
                 "source_clean_counts": dict(dataset.counts),
                 "artifacts": {
-                    name: sha256((output_path / name).read_bytes()).hexdigest()
+                    name: _file_sha256(output_path / name)
                     for name in ("orders.jsonl", "lineage.jsonl", "duplicates.jsonl", "audit.json")
                 },
             }
