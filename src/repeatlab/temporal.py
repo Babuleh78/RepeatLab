@@ -9,6 +9,8 @@ type OrderKind = Literal["sale", "cancellation"]
 
 
 def _require_naive(value: datetime, name: str) -> None:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime")
     if value.tzinfo is not None:
         raise ValueError(f"{name} must be naive, in the source log's time scale")
 
@@ -22,6 +24,8 @@ class Order:
     kind: OrderKind
 
     def __post_init__(self) -> None:
+        if self.customer_id is not None and not isinstance(self.customer_id, str):
+            raise TypeError("customer_id must be a string or None")
         _require_naive(self.event_time, "event_time")
         if self.kind not in ("sale", "cancellation"):
             raise ValueError("kind must be sale or cancellation")
@@ -57,6 +61,11 @@ def build_snapshot(
     """
     _require_naive(snapshot_time, "snapshot_time")
     _require_naive(observed_until, "observed_until")
+    if any(
+        not isinstance(days, int) or isinstance(days, bool)
+        for days in (horizon_days, lookback_days)
+    ):
+        raise TypeError("horizon_days and lookback_days must be integers")
     if horizon_days <= 0 or lookback_days <= 0:
         raise ValueError("horizon_days and lookback_days must be positive")
     if observed_until < snapshot_time:
@@ -81,7 +90,7 @@ def build_snapshot(
             continue
         if history_start <= order.event_time < snapshot_time:
             history_counts[customer_id] = history_counts.get(customer_id, 0) + 1
-        elif snapshot_time <= order.event_time < label_end:
+        elif complete and snapshot_time <= order.event_time < label_end:
             target_customers.add(customer_id)
 
     return tuple(

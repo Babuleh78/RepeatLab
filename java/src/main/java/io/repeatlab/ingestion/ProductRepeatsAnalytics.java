@@ -31,7 +31,7 @@ final class ProductRepeatsAnalytics {
                     ProductRepeatsAnalytics::encode);
             result = new Result(version, Map.copyOf(sqlHashes), rows);
         }
-        AnalyzeCommand.removeTree(spill);
+        TransactionalOutput.removeTree(spill);
         return result;
     }
 

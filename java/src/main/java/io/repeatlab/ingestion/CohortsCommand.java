@@ -30,7 +30,7 @@ final class CohortsCommand {
             stageName = "orders_validation";
             Path snapshot = stage.resolve("verified-orders");
             OrdersDataset dataset = new OrdersDataset(arguments.input(), snapshot);
-            AnalyzeCommand.removeTree(snapshot);
+            TransactionalOutput.removeTree(snapshot);
 
             stageName = "observation_validation";
             arguments.requireCoverage(dataset.orders);
@@ -64,13 +64,13 @@ final class CohortsCommand {
         } catch (Exception | LinkageError failure) {
             Object fatal = Json.object("schema_version", 1, "status", "failed", "code", "COHORTS_FAILED",
                     "stage", stageName, "error_type", failure.getClass().getSimpleName(),
-                    "message", failure.getMessage(), "started_at", started.toString(),
+                    "message", DiagnosticFailure.describe(failure), "started_at", started.toString(),
                     "finished_at", Instant.now().toString());
             try {
                 err.println(Json.encode(fatal));
                 if (transaction != null) transaction.failed(fatal);
             } catch (IOException diagnosticFailure) {
-                err.println("COHORTS_FAILED: unable to persist diagnostics");
+                err.println("COHORTS_FAILED: cleanup or failure diagnostics incomplete");
             }
             return 1;
         }

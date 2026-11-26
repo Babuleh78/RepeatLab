@@ -62,8 +62,8 @@ final class OrdersDataset {
     OrdersDataset(Path source, Path clean, Path copy, Map<String, Set<String>> products) throws IOException {
         StrictJson.require(products == null || clean != null && products.isEmpty(),
                 "Product memberships require a clean snapshot and an empty destination");
-        Files.createDirectory(copy);
-        Files.copy(source.resolve("manifest.json"), copy.resolve("manifest.json"));
+        TransactionalOutput.privateDirectory(copy);
+        ArtifactFiles.copy(source.resolve("manifest.json"), copy.resolve("manifest.json"));
         manifestHash = Json.hash(copy.resolve("manifest.json"));
         manifest = StrictJson.read(copy.resolve("manifest.json"));
         StrictJson.keys(manifest, "schema", "schema_version", "policy_version", "worker_protocol_version",
@@ -83,7 +83,7 @@ final class OrdersDataset {
         for (String name : CleanWriter.ARTIFACTS) StrictJson.hash(cleanArtifacts.get(name));
         StrictJson.keys(manifest.get("artifacts"), ARTIFACTS.toArray(String[]::new));
         for (String name : ARTIFACTS) {
-            Files.copy(source.resolve(name), copy.resolve(name));
+            ArtifactFiles.copy(source.resolve(name), copy.resolve(name));
             StrictJson.require(Json.hash(copy.resolve(name)).equals(StrictJson.hash(manifest.get("artifacts").get(name))), "Orders artifact hash mismatch: " + name);
         }
         counts = manifest.get("counts");
@@ -106,32 +106,36 @@ final class OrdersDataset {
         StrictJson.keys(audit, "schema", "schema_version", "counts", "source_clean_counts");
         schema(audit);
         StrictJson.require(counts.equals(audit.get("counts")) && sourceCounts.equals(audit.get("source_clean_counts")), "Audit mismatch");
-        if (clean != null) verifyCleanMetadata(clean, input);
+        CleaningPolicy policy = clean == null ? null : verifyCleanMetadata(clean, input);
         readOrders(copy);
-        readLineage(copy, clean, products);
+        readLineage(copy, clean == null ? null : readCleanEvents(clean, policy), products);
     }
 
-    private void verifyCleanMetadata(Path clean, JsonNode input) throws IOException {
+    private CleaningPolicy verifyCleanMetadata(Path clean, JsonNode input) throws IOException {
         Path manifestPath = clean.resolve("manifest.json");
         StrictJson.require(Json.hash(manifestPath).equals(cleanHash), "Clean manifest hash mismatch");
         JsonNode cleanManifest = StrictJson.read(manifestPath);
         equalText(cleanManifest, "schema", "repeatlab-clean");
         StrictJson.version(cleanManifest);
         equalText(cleanManifest, "status", "completed");
+        equalText(cleanManifest, "policy_version", CleaningPolicy.VERSION);
         equalText(cleanManifest, "data_status", dataStatus);
         StrictJson.require(sourceCounts.equals(cleanManifest.get("counts")), "Source counts mismatch");
         StrictJson.require(input.get("config_sha256").textValue().equals(StrictJson.hash(cleanManifest.get("config_sha256"))),
                 "Config lineage mismatch");
+        CleaningPolicy policy = CleaningPolicy.fromManifest(cleanManifest.get("config"));
+        StrictJson.require(policy.hash().equals(input.get("config_sha256").textValue()), "Clean config checksum mismatch");
         JsonNode artifacts = input.get("clean_artifacts");
         StrictJson.require(artifacts.equals(cleanManifest.get("artifacts")), "Clean artifact lineage mismatch");
         for (String name : CleanWriter.ARTIFACTS)
             StrictJson.require(Json.hash(clean.resolve(name)).equals(artifacts.get(name).textValue()), "Clean snapshot hash mismatch");
+        return policy;
     }
 
     private void readOrders(Path copy) throws IOException {
         String previous = null;
         long sales = 0, cancellations = 0, missing = 0, lines = 0;
-        try (var reader = Files.newBufferedReader(copy.resolve("orders.jsonl"))) {
+        try (var reader = ArtifactFiles.reader(copy.resolve("orders.jsonl"))) {
             for (JsonNode node; (node = nextRow(reader)) != null;) {
                 StrictJson.keys(node, "schema", "schema_version", "order_key", "invoice_id", "customer_id", "event_time", "kind",
                         "line_count", "quantity", "stock_code_count", "total_amount");
@@ -168,19 +172,18 @@ final class OrdersDataset {
         requireCount("included_product_rows", lines);
     }
 
-    private static Map<String, CleanOrderLine> readCleanEvents(Path clean) throws IOException {
+    private static Map<String, CleanOrderLine> readCleanEvents(Path clean, CleaningPolicy policy) throws IOException {
         Map<String, CleanOrderLine> events = new HashMap<>();
-        try (var reader = Files.newBufferedReader(clean.resolve("clean_events.jsonl"))) {
+        try (var reader = ArtifactFiles.reader(clean.resolve("clean_events.jsonl"))) {
             for (JsonNode node; (node = nextRow(reader)) != null;) {
                 String id = StrictJson.text(node.get("event_id"));
-                StrictJson.require(events.putIfAbsent(id, CleanOrderLine.read(node)) == null, "Duplicate clean event");
+                StrictJson.require(events.putIfAbsent(id, CleanOrderLine.read(node, policy)) == null, "Duplicate clean event");
             }
         }
         return events;
     }
 
-    private void readLineage(Path copy, Path clean, Map<String, Set<String>> products) throws IOException {
-        Map<String, CleanOrderLine> events = clean == null ? null : readCleanEvents(clean);
+    private void readLineage(Path copy, Map<String, CleanOrderLine> events, Map<String, Set<String>> products) throws IOException {
         Map<String, Order> byInvoice = new HashMap<>();
         for (Order order : orders) byInvoice.put(order.invoice(), order);
         Map<String, Long> lines = new HashMap<>();
@@ -190,7 +193,7 @@ final class OrdersDataset {
         Map<String, Lineage> lineage = new HashMap<>();
         String previous = null;
         long services = 0, serviceOnlyRows = 0, knownMissingCustomerRows = 0;
-        try (var reader = Files.newBufferedReader(copy.resolve("lineage.jsonl"))) {
+        try (var reader = ArtifactFiles.reader(copy.resolve("lineage.jsonl"))) {
             for (JsonNode node; (node = nextRow(reader)) != null;) {
                 StrictJson.keys(node, "schema", "schema_version", "event_id", "invoice_id", "order_key", "disposition");
                 schema(node);
@@ -213,6 +216,10 @@ final class OrdersDataset {
                 }
                 lineage.put(id, new Lineage(invoice, service));
                 Order order = byInvoice.get(invoice);
+                if (order != null && event != null) {
+                    StrictJson.require(Objects.equals(order.customer(), event.customer())
+                            && order.kind().equals(event.kind()) && order.time().equals(event.time()), "Order/clean metadata mismatch");
+                }
                 if (order != null && order.customer() == null) knownMissingCustomerRows++;
                 if (service) {
                     StrictJson.require(node.get("order_key").isNull(), "Service maps to order");
@@ -223,8 +230,6 @@ final class OrdersDataset {
                     StrictJson.require(order != null, "Lineage maps to missing order");
                     lines.merge(invoice, 1L, Math::addExact);
                     if (event != null) {
-                        StrictJson.require(Objects.equals(order.customer(), event.customer())
-                                && order.kind().equals(event.kind()) && order.time().equals(event.time()), "Order/clean metadata mismatch");
                         quantities.merge(invoice, event.quantity(), BigInteger::add);
                         amounts.computeIfAbsent(invoice, ignored -> new ExactDecimal.Sum()).add(event.price(), event.quantity());
                         stocks.computeIfAbsent(invoice, ignored -> new HashSet<>()).add(event.stock());
@@ -264,7 +269,7 @@ final class OrdersDataset {
         Set<String> duplicated = new HashSet<>();
         Map<String, Long> productDuplicateExcess = new HashMap<>();
         String previousGroup = null;
-        try (var reader = Files.newBufferedReader(copy.resolve("duplicates.jsonl"))) {
+        try (var reader = ArtifactFiles.reader(copy.resolve("duplicates.jsonl"))) {
             for (JsonNode node; (node = nextRow(reader)) != null;) {
                 StrictJson.keys(node, "schema", "schema_version", "event_ids"); schema(node);
                 JsonNode ids = node.get("event_ids");
@@ -298,7 +303,7 @@ final class OrdersDataset {
 
     static List<JsonNode> rows(Path path) throws IOException {
         List<JsonNode> result = new ArrayList<>();
-        try (var reader = Files.newBufferedReader(path)) {
+        try (var reader = ArtifactFiles.reader(path)) {
             for (String line; (line = reader.readLine()) != null;) result.add(parseRow(line));
         }
         return result;

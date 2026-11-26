@@ -116,7 +116,7 @@ def test_monthly_comparison_preserves_clean_and_binds_reproducible_outputs(tmp_p
     assert manifest["sql_sha256"] == {"duplicate_sensitivity.sql": hashlib.sha256(sql).hexdigest()}
     for name in (*manifest["artifacts"], "manifest.json"):
         assert (first / name).read_bytes() == (second / name).read_bytes()
-    assert not list((first / ".partial").iterdir())
+    assert not (first / ".partial").exists()
     assert {p.name: sha256(p) for p in clean.iterdir() if p.is_file()} == original
     assert run_comparison(clean, first).returncode == 1
     assert sha256(first / "manifest.json") == sha256(second / "manifest.json")

@@ -80,15 +80,18 @@ public final class Main {
         try { input = Path.of(parameters.get("--input")); output = Path.of(parameters.get("--output")); }
         catch (InvalidPathException invalid) { err.print(HELP); return 64; }
         TransactionalOutput transaction = null;
+        String stageName = "output_reservation";
         Instant started = Instant.now();
         try {
             output = ObservedOrdersArguments.resolveOutput(output);
             input = ObservedOrdersArguments.resolveSource(input, output, "workbook");
             transaction = new TransactionalOutput(output);
+            stageName = "snapshot";
             Path stage = transaction.staging();
             Path snapshot = stage.resolve("source.xlsx");
-            Files.copy(input, snapshot);
+            ArtifactFiles.copy(input.toRealPath(), snapshot);
             String sourceHash = Json.hash(snapshot);
+            stageName = "workbook";
             WorkbookReader workbook;
             QualityAudit audit;
             try (var raw = Files.newBufferedWriter(stage.resolve("raw_transactions.jsonl"), StandardCharsets.UTF_8);
@@ -98,6 +101,7 @@ public final class Main {
                 workbook.read(snapshot);
             }
             Files.delete(snapshot);
+            stageName = "publication";
             Json.write(stage.resolve("audit.json"), audit.summary(workbook.sheets()));
             Map<String, String> hashes = new LinkedHashMap<>();
             for (String artifact : TransactionalOutput.ARTIFACTS) hashes.put(artifact, Json.hash(stage.resolve(artifact)));
@@ -114,18 +118,20 @@ public final class Main {
             return audit.hasErrors() ? 2 : 0;
         } catch (Exception failure) {
             Map<String, Object> fatal = Json.object("schema_version", 1, "status", "failed", "code", "INGESTION_FAILED",
-                    "error_type", failure.getClass().getSimpleName(), "message", failure.getMessage(),
+                    "stage", stageName,
+                    "error_type", failure.getClass().getSimpleName(), "message", DiagnosticFailure.describe(failure),
                     "started_at", started.toString(), "finished_at", Instant.now().toString());
             if (failure instanceof WorkbookFailure workbookFailure) {
                 fatal.put("sheet_index", workbookFailure.sheetIndex);
-                fatal.put("sheet_name", workbookFailure.sheetName);
                 fatal.put("row_number", workbookFailure.rowNumber);
             }
             try {
                 err.println(Json.encode(fatal));
+                // The sheet title is useful locally and can contain customer-provided text.
+                if (failure instanceof WorkbookFailure workbookFailure) fatal.put("sheet_name", workbookFailure.sheetName);
                 if (transaction != null) transaction.failed(fatal);
             } catch (Exception diagnosticFailure) {
-                err.println("INGESTION_FAILED: unable to persist diagnostics: " + diagnosticFailure.getClass().getSimpleName());
+                err.println("INGESTION_FAILED: cleanup or failure diagnostics incomplete: " + diagnosticFailure.getClass().getSimpleName());
             }
             return 1;
         }

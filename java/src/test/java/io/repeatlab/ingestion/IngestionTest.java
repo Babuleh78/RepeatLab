@@ -71,7 +71,11 @@ class IngestionTest {
         assertEquals(0, manifest.path("sheets").get(2).path("physical_rows").asInt());
         assertArrayEquals(before, Files.readAllBytes(source));
         assertEquals("1900-01-01T12:00:00", json(out.resolve("audit.json")).path("date_range").path("min").asText());
-        assertTrue(lines(out.resolve("issues.jsonl")).stream().anyMatch(n -> n.path("code").asText().equals("POSSIBLE_DUPLICATE")));
+        JsonNode duplicate = lines(out.resolve("issues.jsonl")).stream()
+                .filter(n -> n.path("code").asText().equals("POSSIBLE_DUPLICATE")).findFirst().orElseThrow();
+        assertEquals(2, duplicate.path("sheet_index").intValue());
+        assertEquals(JSON.readTree("{\"sheet_index\":1,\"sheet_name\":\"Sheet1\",\"row_number\":3}"),
+                duplicate.path("related_row"));
     }
 
     @Test void hashesArtifactsAndReproducesStableOutputs() throws Exception {
@@ -92,6 +96,36 @@ class IngestionTest {
         assertNotEquals(manifest.path("source").path("sha256"), json(third.resolve("manifest.json")).path("source").path("sha256"));
     }
 
+    @Test void requiresTheXlsxWorkbookContentType() throws Exception {
+        Path source = write(temp.resolve("type.xlsx"), false, header() + data(2));
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path types = parts.getPath("/[Content_Types].xml");
+            String xml = Files.readString(types);
+            Files.writeString(types, xml.replace("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"same-part", "wrong-type"})
+    void requiresDistinctWorksheetPartsAndMatchingRelationships(String problem) throws Exception {
+        Path source = write(temp.resolve("parts.xlsx"), false, header() + data(2), header() + data(2));
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path rels = parts.getPath("/xl/_rels/workbook.xml.rels");
+            String xml = Files.readString(rels);
+            Files.writeString(rels, problem.equals("same-part")
+                    ? xml.replace("Target=\"worksheets/sheet2.xml\"", "Target=\"worksheets/sheet1.xml\"")
+                    : xml.replace("worksheet\" Target=\"worksheets/sheet2.xml\"", "image\" Target=\"worksheets/sheet2.xml\""));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertEquals(2, json(out.resolve("fatal.json")).path("sheet_index").intValue());
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
     @Test void keepsRowErrorsAndDoesNotTrustFormulaCaches() throws Exception {
         String bad = data(2).replace("<v>2</v>", "<v>abc</v>").replace("<v>1.5</v>", "<v>60</v>")
                 .replace("<v>0.1000</v>", "<f>1/0</f><v>-99</v>");
@@ -108,6 +142,18 @@ class IngestionTest {
         assertEquals("1/0", cell.path("formula").path("text").asText());
         assertEquals("-99", cell.path("cached_value").asText());
         assertEquals("errors", json(out.resolve("manifest.json")).path("data_status").asText());
+    }
+
+    @Test void ignoresUnrelatedStringTablesWhenResolvingCustomerIds() throws Exception {
+        String row = data(2).replace(text("G2", "00042"), "<c r=\"G2\" t=\"s\"><v>1</v></c>");
+        Path source = write(temp.resolve("strings.xlsx"), false, header() + row);
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path rels = parts.getPath("/xl/_rels/workbook.xml.rels");
+            Files.writeString(rels, Files.readString(rels).replace("/sharedStrings\"", "/customXml\""));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertFalse(Files.exists(out.resolve("manifest.json")));
     }
 
     @Test void distinguishesBlankEmptyStringAndMissing() throws Exception {
@@ -152,6 +198,30 @@ class IngestionTest {
         for (String code : List.of("INVALID_QUANTITY", "INVALID_PRICE", "INVALID_DATE"))
             assertTrue(issues.stream().anyMatch(n -> n.path("code").asText().equals(code) && n.path("severity").asText().equals("error")), code);
         assertEquals(4, lines(out.resolve("raw_transactions.jsonl")).size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"<c r=\"F2\"><v>0.1</v><v>0.2</v></c>",
+            "<c r=\"F2\"><f>1</f><f>2</f><v>1</v></c>",
+            "<c r=\"F2\"><is><t>0.1</t></is></c>",
+            "<c r=\"F2\" t=\"inlineStr\"><is><t>0.1</t></is><is><t>0.2</t></is></c>"})
+    void rejectsAmbiguousCellContents(String cell) throws Exception {
+        Path source = write(temp.resolve("cell.xlsx"), false, header() + data(2).replace(number("F2", "0.1000"), cell));
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertEquals(2, json(out.resolve("fatal.json")).path("row_number").intValue());
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
+    @Test void refusesConflictingWorkbookDateSystems() throws Exception {
+        Path source = write(temp.resolve("calendar.xlsx"), false, header() + data(2));
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path book = parts.getPath("/xl/workbook.xml");
+            Files.writeString(book, Files.readString(book).replace("<sheets>", "<workbookPr date1904=\"true\"/><sheets>"));
+        }
+        Path out = temp.resolve("out");
+        assertEquals(1, ingest(source, out));
+        assertFalse(Files.exists(out.resolve("manifest.json")));
     }
 
     @Test void acceptsAliasesAndRejectsTimezoneAssumptions() throws Exception {
@@ -207,7 +277,57 @@ class IngestionTest {
         assertThrows(java.io.IOException.class,
                 () -> transaction.publish(hashes, java.util.Map.of("status", "completed"), java.util.Map.of()));
         assertEquals("existing", Files.readString(out.resolve("issues.jsonl")));
+        transaction.failed(java.util.Map.of("status", "failed"));
+        assertEquals("existing", Files.readString(out.resolve("issues.jsonl")));
+        assertFalse(Files.exists(out.resolve("raw_transactions.jsonl")));
+        assertFalse(Files.exists(out.resolve(".partial")));
         assertFalse(Files.exists(out.resolve("manifest.json")));
+    }
+
+    @Test void cleansOtherOutputsAndWritesFatalWhenOnePublishedFileCannotBeRemoved() throws Exception {
+        Path out = temp.resolve("publication");
+        TransactionalOutput transaction = new TransactionalOutput(out);
+        var hashes = new java.util.HashMap<String, String>();
+        for (String name : TransactionalOutput.ARTIFACTS) {
+            hashes.put(name, hash(Files.writeString(transaction.staging().resolve(name), "{}\n")));
+        }
+        Path sentinel = Files.writeString(out.resolve("audit.json"), "existing");
+        assertThrows(java.io.IOException.class,
+                () -> transaction.publish(hashes, java.util.Map.of("status", "completed"), java.util.Map.of()));
+        Path first = out.resolve("raw_transactions.jsonl"), second = out.resolve("issues.jsonl");
+        assertTrue(Files.isRegularFile(second));
+        Files.delete(first);
+        Files.createDirectory(first);
+        Path otherFile = Files.writeString(first.resolve("keep"), "unrelated");
+        assertThrows(java.io.IOException.class, () -> transaction.failed(java.util.Map.of("status", "failed")));
+        assertEquals("unrelated", Files.readString(otherFile));
+        assertFalse(Files.exists(second));
+        assertEquals("existing", Files.readString(sentinel));
+        assertFalse(Files.exists(transaction.staging()));
+        assertFalse(Files.exists(out.resolve("manifest.json")));
+        assertEquals("failed", json(out.resolve("fatal.json")).path("status").asText());
+    }
+
+    @Test void keepsSheetNameInPrivateDiagnosticsOnStructuralFailure() throws Exception {
+        String marker = "FixtureCustomerLedger";
+        Path source = write(temp.resolve("source.xlsx"), false, header().replace("Quantity", "Missing"));
+        try (var parts = java.nio.file.FileSystems.newFileSystem(source)) {
+            Path workbook = parts.getPath("/xl/workbook.xml");
+            Files.writeString(workbook, Files.readString(workbook).replace("Sheet1", marker));
+        }
+        var stderr = new ByteArrayOutputStream();
+        Path out = temp.resolve("out");
+        try (var err = new PrintStream(stderr, true, StandardCharsets.UTF_8);
+             var stdout = new PrintStream(java.io.OutputStream.nullOutputStream())) {
+            assertEquals(1, Main.run(new String[]{"ingest", "--input", source.toString(), "--output", out.toString()},
+                    stdout, err));
+        }
+        String message = stderr.toString(StandardCharsets.UTF_8);
+        assertFalse(message.contains(marker));
+        JsonNode diagnostic = JSON.readTree(message);
+        assertEquals("INGESTION_FAILED", diagnostic.path("code").asText());
+        assertFalse(diagnostic.has("sheet_name"));
+        assertEquals(marker, json(out.resolve("fatal.json")).path("sheet_name").asText());
     }
 
     @Test void failureAfterFirstSheetHasStructuredOriginAndNoCompletion() throws Exception {
@@ -219,6 +339,8 @@ class IngestionTest {
         assertEquals("Sheet2", fatal.path("sheet_name").asText());
         assertEquals(1, fatal.path("row_number").asInt());
         assertEquals("failed", fatal.path("status").asText());
+        assertFalse(Files.exists(out.resolve(".partial")));
+        assertFalse(Files.exists(out.resolve("raw_transactions.jsonl")));
     }
 
     @ParameterizedTest

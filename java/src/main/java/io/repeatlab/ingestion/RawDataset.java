@@ -68,7 +68,7 @@ final class RawDataset {
 
     RawDataset(Path input, Path stage) throws IOException {
         snapshot = Files.createDirectory(stage.resolve("input"));
-        Files.copy(input.resolve("manifest.json"), snapshot.resolve("manifest.json"));
+        ArtifactFiles.copy(input.resolve("manifest.json"), snapshot.resolve("manifest.json"));
         manifestHash = Json.hash(snapshot.resolve("manifest.json"));
         manifest = StrictJson.read(snapshot.resolve("manifest.json"));
         StrictJson.keys(manifest, "schema_version", "tool_version", "profile", "status", "data_status",
@@ -92,7 +92,7 @@ final class RawDataset {
         StrictJson.keys(manifest.get("artifacts"), "raw_transactions.jsonl", "issues.jsonl", "audit.json");
         for (String name : TransactionalOutput.ARTIFACTS) {
             String expected = StrictJson.hash(manifest.get("artifacts").get(name));
-            Files.copy(input.resolve(name), snapshot.resolve(name));
+            ArtifactFiles.copy(input.resolve(name), snapshot.resolve(name));
             StrictJson.require(expected.equals(Json.hash(snapshot.resolve(name))), "Input checksum mismatch: " + name);
         }
         StrictJson.require(manifest.get("sheets").isArray() && !manifest.get("sheets").isEmpty(), "Missing sheet metadata");
@@ -109,7 +109,7 @@ final class RawDataset {
         Path expectedIssues = stage.resolve("verified_issues.jsonl");
         QualityAudit audit;
         try (var writer = Files.newBufferedWriter(expectedIssues);
-             var rows = Files.newBufferedReader(snapshot.resolve("raw_transactions.jsonl"))) {
+             var rows = ArtifactFiles.reader(snapshot.resolve("raw_transactions.jsonl"))) {
             audit = new QualityAudit(writer, sourceHash, legacyIngest);
             int previousSheet = 1;
             for (String line; (line = rows.readLine()) != null;) {
@@ -147,8 +147,8 @@ final class RawDataset {
         StrictJson.require(StrictJson.parse(Json.encode(derived)).equals(manifest.get("sheets")), "Sheet metadata does not match raw");
         StrictJson.require(StrictJson.parse(Json.encode(audit.summary(derived))).equals(StrictJson.read(snapshot.resolve("audit.json"))), "Audit does not match raw");
         StrictJson.require(audit.dataStatus().equals(manifest.get("data_status").textValue()), "Manifest quality does not match raw");
-        try (var expected = Files.newBufferedReader(expectedIssues);
-             var actual = Files.newBufferedReader(snapshot.resolve("issues.jsonl"))) {
+        try (var expected = ArtifactFiles.reader(expectedIssues);
+             var actual = ArtifactFiles.reader(snapshot.resolve("issues.jsonl"))) {
             while (true) {
                 String left = expected.readLine(), right = actual.readLine();
                 if (left == null || right == null) {
@@ -162,7 +162,7 @@ final class RawDataset {
     }
 
     void rows(RowConsumer consumer) throws IOException {
-        try (var input = Files.newBufferedReader(snapshot.resolve("raw_transactions.jsonl"))) {
+        try (var input = ArtifactFiles.reader(snapshot.resolve("raw_transactions.jsonl"))) {
             for (String line; (line = input.readLine()) != null;) {
                 JsonNode node = StrictJson.parse(line);
                 if (!node.get("kind").textValue().equals("data")) continue;

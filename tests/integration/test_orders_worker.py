@@ -84,12 +84,14 @@ def test_installed_worker_invalid_arguments_exit_64(tmp_path: Path, arguments: l
 
 
 def test_installed_worker_invalid_input_exits_1_with_fatal_diagnostics(tmp_path: Path) -> None:
-    source, output = tmp_path / "missing", tmp_path / "orders"
+    source, output = tmp_path / "synthetic-private-location", tmp_path / "orders"
     process = run_worker(source, output, tmp_path)
     assert process.returncode == 1
     assert process.stderr
     assert not (output / "manifest.json").exists()
-    assert json.loads((output / "fatal.json").read_bytes())["stage"] == "snapshot_clean"
+    fatal = (output / "fatal.json").read_bytes()
+    assert json.loads(fatal)["stage"] == "snapshot_clean"
+    assert source.name.encode() not in process.stderr + fatal
 
 
 def test_installed_worker_preserves_existing_output_on_error(tmp_path: Path) -> None:

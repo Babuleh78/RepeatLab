@@ -53,6 +53,7 @@ final class SnapshotCommand {
         } catch (IllegalArgumentException | DateTimeException invalid) { return 64; }
 
         TransactionalOutput transaction = null;
+        String stageName = "output_reservation";
         Instant started = Instant.now();
         try {
             output = ObservedOrdersArguments.resolveOutput(output);
@@ -60,13 +61,17 @@ final class SnapshotCommand {
             config = ObservedOrdersArguments.resolveSource(config, output, "config");
             transaction = new TransactionalOutput(output);
             Path stage = transaction.staging();
+            stageName = "config";
             CleaningPolicy policy = CleaningPolicy.read(config);
+            stageName = "raw_validation";
             RawDataset raw = new RawDataset(input, stage);
+            stageName = "snapshot";
             var ledger = new Ledger(window, policy);
             try {
                 raw.rows(row -> ledger.add(row, raw.dateSystem));
             } finally { raw.releaseSnapshot(); }
             long customers = ledger.write(stage.resolve(ROWS));
+            stageName = "publication";
             var counts = Json.object("customers", customers, "undated_rows", ledger.undated,
                     "dated_rows_without_invoice", ledger.noInvoice,
                     "quarantined_history_invoices", ledger.invalidHistory,
@@ -86,11 +91,12 @@ final class SnapshotCommand {
             return withErrors ? 2 : 0;
         } catch (Exception failure) {
             Object fatal = Json.object("schema_version", 1, "status", "failed", "code", "SNAPSHOT_FAILED",
-                    "error_type", failure.getClass().getSimpleName(), "message", failure.getMessage());
+                    "stage", stageName,
+                    "error_type", failure.getClass().getSimpleName(), "message", DiagnosticFailure.describe(failure));
             try {
                 err.println(Json.encode(fatal));
                 if (transaction != null) transaction.failed(fatal);
-            } catch (IOException diagnostic) { err.println("SNAPSHOT_FAILED: unable to persist diagnostics"); }
+            } catch (IOException diagnostic) { err.println("SNAPSHOT_FAILED: cleanup or failure diagnostics incomplete"); }
             return 1;
         }
     }
@@ -138,7 +144,7 @@ final class SnapshotCommand {
                 // A matching invoice on opposite sides of t necessarily has two distinct event times.
                 if (history.containsKey(entry.getKey()) || invoice.invalid || !invoice.conflicts.isEmpty()) {
                     invalidTarget++;
-                } else if (purchase(invoice)) {
+                } else if (window.complete() && purchase(invoice) && buyers.containsKey(invoice.customer)) {
                     targetBuyers.add(invoice.customer);
                 }
             }

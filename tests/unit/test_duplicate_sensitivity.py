@@ -1,5 +1,7 @@
 """Exercise the two exact order scenarios on classified source rows."""
 
+import os
+import stat
 from dataclasses import replace
 from decimal import Decimal, localcontext
 from hashlib import sha256
@@ -40,6 +42,8 @@ def test_scenarios_preserve_orders_and_collapse_only_equal_contents(tmp_path: Pa
     with localcontext() as context:
         context.prec = 2
         assert run_worker(source, output) == 2
+    if os.name == "posix":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert {p.name: p.read_bytes() for p in source.iterdir()} == source_bytes
     rows = records(output)
     assert [r["order_key"] for r in rows] == ["C1", "I", "OTHER"]
@@ -161,3 +165,4 @@ def test_changed_manifest_cannot_receive_a_success_receipt(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "clean manifest changed" in captured.err
+    assert not output.exists()

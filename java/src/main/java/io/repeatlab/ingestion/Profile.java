@@ -23,14 +23,14 @@ final class Profile {
         Map<String, Integer> mapping = new LinkedHashMap<>();
         for (int column = 0; column < cells.size(); column++) {
             Cell cell = cells.get(column);
-            if (cell.isFormula()) throw new IOException("Formula in header at " + cell.reference());
+            if (cell.isFormula()) throw new DiagnosticFailure("Formula in header at " + cell.reference());
             String name = cell.value() == null ? null : ALIASES.get(cell.value());
             if (name != null && mapping.putIfAbsent(name, column) != null)
-                throw new IOException("Ambiguous header for " + name);
+                throw new DiagnosticFailure("Ambiguous header for " + name);
         }
         if (!mapping.keySet().containsAll(FIELDS)) {
             List<String> missing = FIELDS.stream().filter(field -> !mapping.containsKey(field)).toList();
-            throw new IOException("Missing required headers: " + String.join(", ", missing));
+            throw new DiagnosticFailure("Missing required headers: " + String.join(", ", missing));
         }
         return mapping;
     }

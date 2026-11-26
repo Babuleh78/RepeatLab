@@ -15,10 +15,14 @@ import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.openxml4j.opc.PackageAccess;
+import org.apache.poi.openxml4j.opc.PackagePart;
+import org.apache.poi.openxml4j.opc.PackagePartName;
+import org.apache.poi.openxml4j.opc.PackageRelationshipTypes;
+import org.apache.poi.openxml4j.opc.TargetMode;
 import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
-import org.apache.poi.xssf.eventusermodel.XSSFReader;
 import org.apache.poi.xssf.model.SharedStrings;
 import org.apache.poi.xssf.usermodel.XSSFRichTextString;
+import org.apache.poi.xssf.usermodel.XSSFRelation;
 
 final class WorkbookReader {
     private static final String NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -40,18 +44,42 @@ final class WorkbookReader {
 
     void read(Path source) throws Exception {
         try (OPCPackage pkg = OPCPackage.open(source.toFile(), PackageAccess.READ)) {
-            XSSFReader reader = new XSSFReader(pkg);
-            SharedStrings strings = new ReadOnlySharedStringsTable(pkg, false);
+            var workbooks = pkg.getRelationshipsByType(PackageRelationshipTypes.CORE_DOCUMENT);
+            if (workbooks.size() != 1 || workbooks.getRelationship(0).getTargetMode() != TargetMode.INTERNAL)
+                throw new IOException("Expected one internal workbook relationship");
+            var workbook = pkg.getPart(workbooks.getRelationship(0));
+            if (workbook == null || !XSSFRelation.WORKBOOK.getContentType().equals(workbook.getContentType()))
+                throw new IOException("Expected an XLSX workbook part");
+            SharedStrings strings = sharedStrings(workbook);
             List<Sheet> descriptors;
-            try (InputStream input = reader.getWorkbookData()) { descriptors = workbook(input); }
+            try (InputStream input = workbook.getInputStream()) { descriptors = workbook(input); }
             if (descriptors.isEmpty()) throw new IOException("Workbook has no sheets");
+            var parts = new HashSet<PackagePartName>();
             for (int index = 0; index < descriptors.size(); index++) {
                 Sheet sheet = descriptors.get(index);
-                try (InputStream input = reader.getSheet(sheet.relationship())) {
+                var rel = workbook.getRelationship(sheet.relationship());
+                if (rel == null || rel.getTargetMode() != TargetMode.INTERNAL
+                        || !XSSFRelation.WORKSHEET.getRelation().equals(rel.getRelationshipType()))
+                    throw new WorkbookFailure(index + 1, sheet.name(), 0, new IOException("Invalid worksheet relationship"));
+                var part = workbook.getRelatedPart(rel);
+                if (!XSSFRelation.WORKSHEET.getContentType().equals(part.getContentType()) || !parts.add(part.getPartName()))
+                    throw new WorkbookFailure(index + 1, sheet.name(), 0, new IOException("Invalid or repeated worksheet part"));
+                try (InputStream input = part.getInputStream()) {
                     readSheet(input, strings, index + 1, sheet);
                 }
             }
         }
+    }
+
+    private static SharedStrings sharedStrings(PackagePart workbook) throws Exception {
+        var tables = workbook.getRelationshipsByType(XSSFRelation.SHARED_STRINGS.getRelation());
+        if (tables.size() == 0) return null;
+        if (tables.size() != 1 || tables.getRelationship(0).getTargetMode() != TargetMode.INTERNAL)
+            throw new IOException("Expected one internal shared strings table");
+        var part = workbook.getRelatedPart(tables.getRelationship(0));
+        if (!XSSFRelation.SHARED_STRINGS.getContentType().equals(part.getContentType()))
+            throw new IOException("Invalid shared strings part");
+        return new ReadOnlySharedStringsTable(part, false);
     }
 
     private record Sheet(String name, String state, String relationship) {}
@@ -61,7 +89,7 @@ final class WorkbookReader {
         List<Sheet> result = new ArrayList<>();
         var names = new HashSet<String>();
         var relationships = new HashSet<String>();
-        boolean inSheets = false, seenSheets = false;
+        boolean inSheets = false, seenSheets = false, seenProperties = false;
         try {
             root(xml, "workbook");
             while (xml.hasNext()) {
@@ -70,6 +98,8 @@ final class WorkbookReader {
                 if (event == XMLStreamConstants.END_ELEMENT && element(xml, "sheets")) inSheets = false;
                 if (event != XMLStreamConstants.START_ELEMENT) continue;
                 if (!inSheets && element(xml, "workbookPr")) {
+                    if (seenProperties) throw new IOException("Duplicate workbook properties");
+                    seenProperties = true;
                     String flag = attr(xml, "date1904", "false");
                     if (!List.of("false", "true", "0", "1").contains(flag)) throw new IOException("Invalid date1904 flag");
                     date1904 = flag.equals("true") || flag.equals("1");
@@ -173,10 +203,15 @@ final class WorkbookReader {
             rejectDtd(event);
             if (event == XMLStreamConstants.START_ELEMENT) {
                 if (element(xml, "is")) {
+                    if (hasInline || !type.equals("inlineStr"))
+                        throw new IOException("Unexpected inline content at " + reference);
                     hasInline = true;
                     inlineText(xml, text);
-                } else if (element(xml, "v")) rawValue = xml.getElementText();
-                else if (element(xml, "f")) {
+                } else if (element(xml, "v")) {
+                    if (rawValue != null) throw new IOException("Duplicate cell value at " + reference);
+                    rawValue = xml.getElementText();
+                } else if (element(xml, "f")) {
+                    if (formula != null) throw new IOException("Duplicate formula at " + reference);
                     formula = new LinkedHashMap<>();
                     for (int i = 0; i < xml.getAttributeCount(); i++)
                         formula.put(xml.getAttributeLocalName(i), xml.getAttributeValue(i));

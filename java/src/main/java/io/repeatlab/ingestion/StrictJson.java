@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Set;
@@ -17,14 +16,18 @@ final class StrictJson {
 
     private StrictJson() {}
 
-    static JsonNode read(Path path) throws IOException { return parse(Files.readString(path)); }
-    static JsonNode parse(String value) throws IOException {
-        JsonNode node = MAPPER.readTree(value);
+    static JsonNode read(Path path) throws IOException {
+        try (var reader = ArtifactFiles.reader(path)) {
+            return requireDocument(MAPPER.readTree(reader));
+        }
+    }
+    static JsonNode parse(String value) throws IOException { return requireDocument(MAPPER.readTree(value)); }
+    private static JsonNode requireDocument(JsonNode node) throws IOException {
         require(node != null, "Empty JSON");
         return node;
     }
     static void require(boolean valid, String message) throws IOException {
-        if (!valid) throw new IOException(message);
+        if (!valid) throw new DiagnosticFailure(message);
     }
     static void keys(JsonNode node, String... expected) throws IOException {
         require(node != null && node.isObject(), "Expected JSON object");

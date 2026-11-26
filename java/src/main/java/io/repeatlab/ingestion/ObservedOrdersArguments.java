@@ -84,7 +84,7 @@ record ObservedOrdersArguments(Path input, Path clean, Path output, LocalDateTim
         boolean exists = Files.isDirectory(source);
         Path location = exists ? source.toRealPath() : prospectivePath(source);
         if (target.startsWith(location) || location.startsWith(target))
-            throw new IOException("Output directory overlaps the input " + name + " directory");
+            throw new DiagnosticFailure("Output directory overlaps the input " + name + " directory");
         // Let normal validation diagnose a missing input at its original path.
         return exists ? location : source;
     }
@@ -112,7 +112,7 @@ record ObservedOrdersArguments(Path input, Path clean, Path output, LocalDateTim
     void requireCoverage(List<OrdersDataset.Order> orders) throws IOException {
         for (OrdersDataset.Order order : orders) {
             if (order.time().isBefore(from) || !order.time().isBefore(until))
-                throw new IOException("Order timestamp is outside the declared observation interval");
+                throw new DiagnosticFailure("Order timestamp is outside the declared observation interval");
         }
     }
 

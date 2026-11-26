@@ -1,7 +1,7 @@
 """Write paired per-order facts for a verified, private clean snapshot."""
 
-import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from repeatlab.aggregation import AggregatedOrder, aggregate_orders
 from repeatlab.cleaning import read_clean_dataset
-from repeatlab.orders import _file_sha256
+from repeatlab.orders import _ArgumentParser, _failure_message, _file_sha256
 
 
 def _identity(order: AggregatedOrder) -> tuple[str, str | None, datetime, str, int]:
@@ -54,7 +54,8 @@ def write_facts(clean_path: Path, output_path: Path) -> str:
     ):
         raise ValueError("scenario order identities differ")
 
-    stream = output_path.open("x", encoding="utf-8", newline="\n")
+    descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
     try:
         with stream:
             for before, after in zip(retained.orders, collapsed.orders, strict=True):
@@ -74,7 +75,7 @@ def write_facts(clean_path: Path, output_path: Path) -> str:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = _ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     try:
@@ -85,16 +86,22 @@ def main(arguments: list[str] | None = None) -> int:
         manifest = options.input / "manifest.json"
         manifest_hash = _file_sha256(manifest)
         status = write_facts(options.input, options.output)
-        if _file_sha256(manifest) != manifest_hash:
-            raise ValueError("clean manifest changed while writing facts")
-        receipt = {
-            "protocol_version": 1,
-            "clean_manifest_sha256": manifest_hash,
-            "facts_sha256": _file_sha256(options.output),
-        }
-        print(json.dumps(receipt, separators=(",", ":")), flush=True)
+        try:
+            if _file_sha256(manifest) != manifest_hash:
+                print("duplicate sensitivity failed: clean manifest changed", file=sys.stderr)
+                options.output.unlink()
+                return 1
+            receipt = {
+                "protocol_version": 1,
+                "clean_manifest_sha256": manifest_hash,
+                "facts_sha256": _file_sha256(options.output),
+            }
+            print(json.dumps(receipt, separators=(",", ":")), flush=True)
+        except BaseException:
+            options.output.unlink(missing_ok=True)
+            raise
     except (Exception, KeyboardInterrupt) as error:
-        print(f"duplicate sensitivity failed: {type(error).__name__}: {error}", file=sys.stderr)
+        print(f"duplicate sensitivity failed: {_failure_message(error)}", file=sys.stderr)
         return 1
     return 2 if status == "quarantined" else 0
 

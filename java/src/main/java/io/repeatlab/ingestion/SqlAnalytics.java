@@ -40,13 +40,15 @@ final class SqlAnalytics {
 
     static int scale(List<OrdersDataset.Order> orders) throws IOException {
         BigInteger scale = BigInteger.ZERO;
-        for (var order : orders) scale = scale.max(shape(order.amount()).scale());
-        StrictJson.require(scale.compareTo(BigInteger.valueOf(38)) <= 0, "SQL exact scale exceeds 38");
+        BigInteger integerDigits = BigInteger.ZERO;
         for (var order : orders) {
             DecimalShape shape = shape(order.amount());
-            BigInteger width = BigInteger.valueOf(shape.precision()).add(scale).subtract(shape.scale());
-            StrictJson.require(width.compareTo(BigInteger.valueOf(38)) <= 0, "SQL exact coefficient exceeds 38 digits");
+            scale = scale.max(shape.scale());
+            integerDigits = integerDigits.max(BigInteger.valueOf(shape.precision()).subtract(shape.scale()));
         }
+        StrictJson.require(scale.compareTo(BigInteger.valueOf(38)) <= 0, "SQL exact scale exceeds 38");
+        StrictJson.require(integerDigits.add(scale).compareTo(BigInteger.valueOf(38)) <= 0,
+                "SQL exact coefficient exceeds 38 digits");
         return scale.intValueExact();
     }
 
@@ -90,7 +92,7 @@ final class SqlAnalytics {
             missing = query(connection, "missing_customer", stage, scale, hashes);
         }
         // Native connection is closed before its private spill directory is removed.
-        AnalyzeCommand.removeTree(spill);
+        TransactionalOutput.removeTree(spill);
         return new Result(scale, version, hashes, monthly, missing);
     }
 

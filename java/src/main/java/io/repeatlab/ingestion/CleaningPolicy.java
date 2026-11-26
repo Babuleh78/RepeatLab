@@ -3,24 +3,39 @@ package io.repeatlab.ingestion;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeSet;
+import java.util.Set;
 
-record CleaningPolicy(List<String> serviceCodes) {
+final class CleaningPolicy {
     static final String VERSION = "clean-v1";
     static final String SCHEMA = "repeatlab-clean";
+    private final List<String> serviceCodes;
+    private final Set<String> serviceIndex;
+
+    private CleaningPolicy(List<String> codes) {
+        serviceIndex = Set.copyOf(codes);
+        serviceCodes = serviceIndex.stream().sorted(OrdersDataset.CODEPOINT).toList();
+    }
 
     static CleaningPolicy read(Path path) throws IOException {
-        JsonNode node = StrictJson.read(path);
+        return parse(StrictJson.read(path.toRealPath()), false);
+    }
+
+    static CleaningPolicy fromManifest(JsonNode node) throws IOException {
+        return parse(node, true);
+    }
+
+    private static CleaningPolicy parse(JsonNode node, boolean requireCanonical) throws IOException {
         StrictJson.keys(node, "policy_version", "service_codes");
         StrictJson.require(VERSION.equals(StrictJson.text(node.get("policy_version"))), "Unsupported cleaning policy");
         StrictJson.require(node.get("service_codes").isArray(), "service_codes must be an array");
-        TreeSet<String> codes = new TreeSet<>((left, right) ->
-                Arrays.compare(left.codePoints().toArray(), right.codePoints().toArray()));
+        List<String> codes = new ArrayList<>();
         for (JsonNode code : node.get("service_codes")) codes.add(StrictJson.text(code));
-        return new CleaningPolicy(List.copyOf(codes));
+        var policy = new CleaningPolicy(codes);
+        if (requireCanonical) StrictJson.require(codes.equals(policy.serviceCodes), "Clean config is not canonical");
+        return policy;
     }
 
     Map<String, Object> canonical() { return Json.object("policy_version", VERSION, "service_codes", serviceCodes); }
@@ -45,7 +60,7 @@ record CleaningPolicy(List<String> serviceCodes) {
         }
         return Json.hashText(value.append("]}").toString());
     }
-    boolean service(String code) { return serviceCodes.contains(code); }
+    boolean service(String code) { return serviceIndex.contains(code); }
 
     static boolean missing(String text) {
         return text == null || text.codePoints().allMatch(c ->

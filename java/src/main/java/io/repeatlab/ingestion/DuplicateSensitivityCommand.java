@@ -3,12 +3,13 @@ package io.repeatlab.ingestion;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,11 +67,11 @@ final class DuplicateSensitivityCommand {
                 verifyWorkerReceipt(output.resolve("worker.stdout.log"), snapshot.manifestHash(), facts);
 
                 stageName = "sql";
-                sql = DuplicateSensitivityAnalytics.run(facts, stage, clean.resolve("clean_events.jsonl"));
+                sql = DuplicateSensitivityAnalytics.run(facts, stage, clean.resolve("clean_events.jsonl"), snapshot.policy());
                 StrictJson.require(sql.productLines() == OrdersDataset.count(snapshot.counts(), "accepted_product_rows"),
                         "Retained product rows differ from the clean audit");
             } finally {
-                AnalyzeCommand.removeTree(work);
+                TransactionalOutput.removeTree(work);
             }
 
             stageName = "publication";
@@ -96,20 +97,22 @@ final class DuplicateSensitivityCommand {
             return code;
         } catch (Exception | LinkageError failure) {
             Object fatal = Json.object("schema_version", 1, "status", "failed", "code", "DUPLICATE_SENSITIVITY_FAILED",
-                    "stage", stageName, "error_type", failure.getClass().getSimpleName(), "message", failure.getMessage(),
+                    "stage", stageName, "error_type", failure.getClass().getSimpleName(), "message", DiagnosticFailure.describe(failure),
                     "started_at", started.toString(), "finished_at", Instant.now().toString());
             try {
                 err.println(Json.encode(fatal));
                 if (transaction != null) transaction.failed(fatal);
-            } catch (IOException diagnosticFailure) { err.println("DUPLICATE_SENSITIVITY_FAILED: unable to persist diagnostics"); }
+            } catch (IOException diagnosticFailure) { err.println("DUPLICATE_SENSITIVITY_FAILED: cleanup or failure diagnostics incomplete"); }
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             return 1;
         }
     }
 
     private static void verifyWorkerReceipt(Path receipt, String cleanHash, Path facts) throws IOException {
-        StrictJson.require(Files.size(receipt) <= 512, "Invalid worker receipt size");
-        JsonNode result = StrictJson.read(receipt);
+        byte[] bytes;
+        try (var input = ArtifactFiles.open(receipt)) { bytes = input.readNBytes(513); }
+        StrictJson.require(bytes.length <= 512, "Invalid worker receipt size");
+        JsonNode result = StrictJson.parse(StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString());
         StrictJson.keys(result, "protocol_version", "clean_manifest_sha256", "facts_sha256");
         StrictJson.integer(result.get("protocol_version"), 1, 1);
         StrictJson.require(StrictJson.hash(result.get("clean_manifest_sha256")).equals(cleanHash),
@@ -118,10 +121,10 @@ final class DuplicateSensitivityCommand {
                 "Order facts differ from the worker receipt");
     }
 
-    private record CleanSnapshot(String manifestHash, String configHash, JsonNode artifacts,
+    private record CleanSnapshot(String manifestHash, String configHash, CleaningPolicy policy, JsonNode artifacts,
                                  JsonNode counts, String dataStatus) {
         static CleanSnapshot copy(Path input, Path clean) throws IOException {
-            for (String name : OrdersDataset.CLEAN_FILES) Files.copy(input.resolve(name), clean.resolve(name));
+            for (String name : OrdersDataset.CLEAN_FILES) ArtifactFiles.copy(input.resolve(name), clean.resolve(name));
             Path manifestPath = clean.resolve("manifest.json");
             JsonNode manifest = StrictJson.read(manifestPath);
             StrictJson.version(manifest);
@@ -129,14 +132,9 @@ final class DuplicateSensitivityCommand {
             OrdersDataset.equalText(manifest, "policy_version", CleaningPolicy.VERSION);
             OrdersDataset.equalText(manifest, "status", "completed");
 
-            JsonNode config = manifest.get("config");
-            StrictJson.keys(config, "policy_version", "service_codes");
-            OrdersDataset.equalText(config, "policy_version", CleaningPolicy.VERSION);
-            StrictJson.require(config.get("service_codes").isArray(), "service_codes must be an array");
-            List<String> codes = new ArrayList<>();
-            for (JsonNode value : config.get("service_codes")) codes.add(StrictJson.text(value));
+            CleaningPolicy policy = CleaningPolicy.fromManifest(manifest.get("config"));
             String configHash = StrictJson.hash(manifest.get("config_sha256"));
-            StrictJson.require(new CleaningPolicy(codes).hash().equals(configHash), "Clean config checksum mismatch");
+            StrictJson.require(policy.hash().equals(configHash), "Clean config checksum mismatch");
 
             JsonNode counts = manifest.get("counts");
             JsonNode audit = StrictJson.read(clean.resolve("audit.json"));
@@ -147,7 +145,7 @@ final class DuplicateSensitivityCommand {
             OrdersDataset.equalText(manifest, "data_status", dataStatus);
             JsonNode artifacts = manifest.get("artifacts");
             StrictJson.keys(artifacts, CleanWriter.ARTIFACTS.toArray(String[]::new));
-            CleanSnapshot snapshot = new CleanSnapshot(Json.hash(manifestPath), configHash, artifacts, counts, dataStatus);
+            CleanSnapshot snapshot = new CleanSnapshot(Json.hash(manifestPath), configHash, policy, artifacts, counts, dataStatus);
             snapshot.verifyHashes(clean);
             return snapshot;
         }

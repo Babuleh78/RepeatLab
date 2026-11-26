@@ -208,6 +208,34 @@ def test_unknown_customer_invoice_is_preserved_without_filling_an_id() -> None:
     assert result.quarantined_invoices == ()
 
 
+def test_exact_sum_digit_budget_counts_the_preserved_decimal_places(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = (event("a", unit_price=Decimal("9.90")), event("b", unit_price=Decimal("0.10")))
+    monkeypatch.setenv("REPEATLAB_MAX_ORDER_AMOUNT_DIGITS", "4")
+    assert aggregate_orders(events).orders[0].total_amount.as_tuple() == Decimal("10.00").as_tuple()
+    monkeypatch.setenv("REPEATLAB_MAX_ORDER_AMOUNT_DIGITS", "3")
+    with pytest.raises(ValueError, match="REPEATLAB_MAX_ORDER_AMOUNT_DIGITS"):
+        aggregate_orders(events)
+
+
+def test_budget_applies_to_coefficient_and_allows_compact_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPEATLAB_MAX_ORDER_AMOUNT_DIGITS", "3")
+    compact = event("a", unit_price=Decimal("1E+500"))
+    assert (
+        aggregate_orders([compact]).orders[0].total_amount.as_tuple()
+        == Decimal("1E+500").as_tuple()
+    )
+    for events in (
+        [compact, event("b", unit_price=Decimal("1.00"))],
+        [event("a", unit_price=Decimal("99"), quantity=-11, kind="cancellation")],
+    ):
+        with pytest.raises(ValueError, match="REPEATLAB_MAX_ORDER_AMOUNT_DIGITS"):
+            aggregate_orders(events)
+
+
 @pytest.mark.parametrize(
     "quantities,prices,kind,expected",
     [

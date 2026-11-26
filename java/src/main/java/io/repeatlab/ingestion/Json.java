@@ -39,7 +39,7 @@ final class Json {
 
     static String hash(Path path) throws IOException {
         MessageDigest digest = digest();
-        try (var input = Files.newInputStream(path)) {
+        try (var input = ArtifactFiles.open(path)) {
             byte[] buffer = new byte[65536];
             for (int length; (length = input.read(buffer)) != -1;) digest.update(buffer, 0, length);
         }

@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from io import TextIOWrapper
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
+from repeatlab._artifacts import open_artifact
 from repeatlab.aggregation import AggregationResult, CleanEvent, aggregate_orders
 from repeatlab.temporal import OrderKind
 
@@ -119,7 +121,10 @@ def _parse(payload: str) -> Any:
 def _verified_rows(path: Path, expected_hash: str) -> Generator[Any, None, None]:
     digest = sha256()
     # UTF-8 has a unique encoding and newline="" preserves CR, LF and CRLF verbatim.
-    with path.open(encoding="utf-8", newline="") as stream:
+    with (
+        open_artifact(path) as source,
+        TextIOWrapper(source, encoding="utf-8", newline="") as stream,
+    ):
         for line in stream:
             digest.update(line.encode("utf-8"))
             yield _parse(line)
@@ -274,8 +279,10 @@ def read_clean_dataset(path: str | Path) -> CleanDataset:
 
 
 def _read(path: Path) -> CleanDataset:
+    with open_artifact(path / "manifest.json") as source_file:
+        manifest_text = source_file.read().decode("utf-8")
     manifest = _object(
-        _parse((path / "manifest.json").read_bytes().decode("utf-8")),
+        _parse(manifest_text),
         {
             "schema",
             "schema_version",
@@ -316,7 +323,8 @@ def _read(path: Path) -> CleanDataset:
     hashes = {
         name: _hash(value) for name, value in _object(manifest["artifacts"], _ARTIFACTS).items()
     }
-    audit_bytes = (path / "audit.json").read_bytes()
+    with open_artifact(path / "audit.json") as source_file:
+        audit_bytes = source_file.read()
     _require(
         sha256(audit_bytes).hexdigest() == hashes["audit.json"], "checksum mismatch: audit.json"
     )
